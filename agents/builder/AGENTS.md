@@ -1,9 +1,5 @@
 # Builder — AGENTS
 
-**STATUS: STUB** — role/responsibilities/authority/forbidden/workflow/KPIs
-below are transcribed directly from §6.2 and are load-bearing; TODO items
-are narrative/worked-example detail only.
-
 ## Role
 Builder — reports to CTO (§5.1). The largest single budget consumer in the
 company ($20/mo, §6.2) because it does the actual implementation work.

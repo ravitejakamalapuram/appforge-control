@@ -1,9 +1,5 @@
 # CTO — TOOLS
 
-**STATUS: STUB** — allowed tools, capabilities, env, and deny list below
-are correct per §6.2/§17.2/§29g; TODO is only which skill to prefer for
-which specific review situation.
-
 ## Allowed
 `gh` (read/write in platform + product repos per capability below);
 `appforge` CLI (`validate`, `test`, `build`, `route`, `security permissions`).

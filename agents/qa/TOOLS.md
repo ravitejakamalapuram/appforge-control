@@ -1,9 +1,5 @@
 # QA — TOOLS
 
-**STATUS: STUB** — allowed tools, capabilities, env, and deny list below
-are correct per §6.2/§13.3/§17.2/§29g; TODO is only which skill to prefer
-for which specific test scenario.
-
 ## Allowed
 `gh` (read product repos; write only to a separate tests-only PR);
 `appforge test --e2e`; Playwright (persistent context, `--load-extension`).

@@ -1,9 +1,5 @@
 # QA — AGENTS
 
-**STATUS: STUB** — role/responsibilities/authority/forbidden/outputs/KPIs
-below are transcribed directly from §6.2/§13.3 and are load-bearing; TODO
-items are narrative/worked-example detail only.
-
 ## Role
 QA — reports to CTO (§5.1).
 
@@ -36,9 +32,10 @@ back to Builder with `HANDOFF: <what>, <evidence links>, <acceptance
 criteria>, <open questions>` (§6.1 rule 7).
 
 ## Escalation
-TODO: worked example of a QA-vs-Builder disagreement on whether a finding
-is a real defect vs. expected behavior. Standard ladder otherwise (§6.1
-rule 6).
+Standard ladder (§6.1 rule 6): agent → CTO → CEO → board. A QA-vs-Builder
+disagreement on whether a finding is a real defect vs. expected behavior
+is not QA's to drop — file the bug issue either way (§6.2 Authority: QA
+opens bug issues) and let CTO adjudicate the dispute during review.
 
 ## KPIs
 Defects found pre-release vs. escaped; evidence completeness (deterministic

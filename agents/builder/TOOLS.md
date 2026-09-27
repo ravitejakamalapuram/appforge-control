@@ -1,9 +1,5 @@
 # Builder — TOOLS
 
-**STATUS: STUB** — allowed tools, capabilities, env, and deny list below
-are correct per §6.2/§17.2/§29g; TODO is only which skill to prefer for
-which specific implementation task.
-
 ## Allowed
 `gh` (branch/commit/PR — scoped to the assigned product repo + `appforge-kit`);
 `appforge validate`, `appforge test`, `appforge build`.

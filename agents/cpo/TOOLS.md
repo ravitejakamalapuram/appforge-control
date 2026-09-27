@@ -1,9 +1,5 @@
 # CPO — TOOLS
 
-**STATUS: STUB** — allowed tools, capabilities, env, and deny list below
-are correct per §6.2/§17.2/§29g; TODO is only which skill to prefer in
-which specific research situation.
-
 ## Allowed
 WebSearch/WebFetch; `gh` — **read-only** (no push, no PR, no merge).
 

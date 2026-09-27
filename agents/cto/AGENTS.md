@@ -1,9 +1,5 @@
 # CTO — AGENTS
 
-**STATUS: STUB** — role/responsibilities/authority/forbidden/inputs/outputs/
-KPIs below are transcribed directly from §6.2 and are load-bearing; TODO
-items are narrative/worked-example detail only.
-
 ## Role
 Chief Technology Officer — reports to CEO (§5.1). Builder and QA report to
 the CTO. Folds in Architect/Reviewer/Security/Release duties until those
@@ -42,8 +38,10 @@ Same as every agent (§6.1 rule 7): `in_review`, assign the next owner
 
 ## Escalation
 CRITICAL-risk reviews get a `codex_local` second opinion before sign-off
-(§6.2/§7.1). TODO: worked example of a CTO-vs-CPO scope/feasibility
-conflict. Default is the standard ladder (§6.1 rule 6).
+(§6.2/§7.1). Standard ladder otherwise (§6.1 rule 6): agent → CEO →
+board. A CTO-vs-CPO scope/feasibility conflict goes to CEO with both
+positions stated — CTO's technical veto is real, but resolving the
+resulting priority call is a CEO/board decision, not the CTO's alone.
 
 ## KPIs
 Escaped defects; CI pass rate on `main`; mean PR review latency; reuse

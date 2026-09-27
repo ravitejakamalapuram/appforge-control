@@ -1,9 +1,5 @@
 # Analyst — TOOLS
 
-**STATUS: STUB** — allowed tools, capabilities, env, and deny list below
-are correct per §6.2/§17.2/§29g; TODO is only which skill to prefer for
-which specific analysis task.
-
 ## Allowed
 `appforge metrics` (read + `anomalies` + `pnl` deterministic commands —
 these run as scripts, not model calls, per `config/models.yaml`'s

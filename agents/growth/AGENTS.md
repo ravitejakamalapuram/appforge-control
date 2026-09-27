@@ -1,9 +1,5 @@
 # Growth — AGENTS
 
-**STATUS: STUB** — role/responsibilities/authority/forbidden/KPIs below are
-transcribed directly from §6.2 and are load-bearing; TODO items are
-narrative/worked-example detail only.
-
 ## Role
 Growth, acting CGO — reports to CEO (§5.1).
 
@@ -40,8 +36,10 @@ joint readout), `HANDOFF: <what>, <draft links>, <acceptance criteria>,
 <open questions>` (§6.1 rule 7).
 
 ## Escalation
-TODO: worked example of a Growth-vs-CPO disagreement on a claim's factual
-basis. Standard ladder otherwise (§6.1 rule 6).
+Standard ladder (§6.1 rule 6): agent → CEO → board. A Growth-vs-CPO
+disagreement on whether a claim is factually supported resolves in favor
+of caution — the claim is cut or escalated to CEO, never published while
+disputed (§6.2 Forbidden: "claims not traceable to `product-facts.yaml`").
 
 ## KPIs
 Installs/WAU delta attributable to experiments; activation; experiment
