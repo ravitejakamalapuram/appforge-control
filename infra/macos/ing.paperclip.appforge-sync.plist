@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HEALTHCHECKS_PING_URL_PAPERCLIP</key>
+		<string>https://hc-ping.com/9d507351-69b5-4679-be4e-7f6e74ed43b4</string>
+		<key>NTFY_TOPIC</key>
+		<string>appforge-founder-SGVuqZoj2f3PbnOI</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/rkamalapuram</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control</string>
+	<key>ExitTimeOut</key>
+	<integer>300</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>ing.paperclip.appforge-sync</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/infra/macos/sync.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>1800</integer>
+	<key>StandardErrorPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/sync.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/sync.log</string>
+</dict>
+</plist>

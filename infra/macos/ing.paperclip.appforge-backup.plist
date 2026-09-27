@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>CLOUDFLARE_R2_API_TOKEN</key>
+		<string>cfut_9GFiY8VeBYRclbgbxh9hbdcJsxF0t6s6n49Nqd0577d14be1</string>
+		<key>CLOUDFLARE_ACCOUNT_ID</key>
+		<string>e08ac904468d19ea525b3005cc54888b</string>
+		<key>HEALTHCHECKS_PING_URL_BACKUP</key>
+		<string>https://hc-ping.com/bd69bdde-35f3-46a3-927e-4b96a77f1fd3</string>
+		<key>NTFY_TOPIC</key>
+		<string>appforge-founder-SGVuqZoj2f3PbnOI</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/rkamalapuram</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/rkamalapuram</string>
+	<key>ExitTimeOut</key>
+	<integer>1800</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>ing.paperclip.appforge-backup</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/infra/macos/backup.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>2</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/backup.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/backup.log</string>
+</dict>
+</plist>

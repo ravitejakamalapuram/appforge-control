@@ -4,3 +4,7 @@ node_modules/
 
 # Claude Code config/login dir for Paperclip agents (personal account). Never commit.
 .claude-appforge/
+
+# age keypair for backup encryption (private key). Never commit.
+secrets/
+state/
