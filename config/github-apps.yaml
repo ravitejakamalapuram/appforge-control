@@ -1,0 +1,37 @@
+# GitHub Apps used to mint scoped, short-lived installation tokens for agents
+# (P1-05, master plan §11.3/§17). No secrets in this file — App IDs and Client
+# IDs are not sensitive; the private key lives outside git at
+# secrets/<name>.private-key.pem (gitignored) and is never committed.
+apps:
+  - name: appforge-agents
+    purpose: "Day-to-day agent work: repo:write on assigned product, PRs, issues. No actions:write — agents cannot dispatch release workflows."
+    app_id: 5099019
+    client_id: "Iv23liOwKIHj2BDxRkf8"
+    private_key_path: secrets/appforge-agents.private-key.pem
+    permissions:
+      contents: write
+      issues: write
+      pull_requests: write
+      checks: read
+      actions: read
+      metadata: read # mandatory, GitHub-imposed
+    installed_on:
+      - appforge-kit
+      - appforge-control
+      - appforge-brain
+      - echokit
+      - json-workbench
+      - TelePort
+      - StellarTab
+      - GitaVerses
+      - TeluguPanchangam
+      - cors-enabler
+      - session-transfer
+    deliberately_excluded:
+      - release-platform # separate, more locked-down appforge-release App (not yet created)
+      - InvTrack # kept fully hands-off from agents per founder's extra-care policy
+
+  # appforge-release: not yet created. Needs actions:write on release-platform
+  # only, and its private key must only ever be readable by the CTO/Release
+  # agent's env (§17.1). Create when P1-13's release-gating work is ready to
+  # be exercised by a live agent rather than the founder's own gh CLI.
