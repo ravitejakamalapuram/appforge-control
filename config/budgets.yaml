@@ -1,0 +1,44 @@
+# appforge-control/config/budgets.yaml
+#
+# Company budget system (§24.3/§28/§29f). monthly_cents is the source of
+# truth agents.yaml's per-agent `budget_cents` fields must match — kept as
+# a separate file (rather than only living in agents.yaml) because Paperclip's
+# hard-stop enforcement and the nightly overrun-flagging script both key off
+# this file's shape directly.
+#
+# Reconciliation with the $100/mo cap (§28 cost model):
+#   ceo 1500 + cpo 1200 + cto 1500 + builder 2000 + qa 800 + growth 600
+#     + analyst 400 = 8000 cents ($80, §6.2's "sum to $80 of the $100 cap")
+#   + eval 500 ($5, model-eval from Month 2, §6.2/§28)
+#   = 8500 of 10000 cents committed; the remaining 1500 cents ($15) is the
+#   unlabeled reserve/overrun line from §28 — intentionally not itemized
+#   per-agent so it stays available for whichever agent needs it.
+
+schema: appforge/budgets@1
+
+monthly_cents:
+  company: 10000
+  ceo: 1500
+  cpo: 1200
+  cto: 1500
+  builder: 2000
+  qa: 800
+  growth: 600
+  analyst: 400
+  eval: 500
+
+# Soft per-issue budgets, applied via the issue label `budget:<cents>` and
+# checked by (a) the agent itself as a HEARTBEAT rule and (b) a nightly
+# script that flags overruns (§24.3). Default when no explicit label is set,
+# keyed by the issue's routed tier.
+per_issue_default_cents:
+  LOW: 20
+  NORMAL: 150
+  HIGH: 500
+  CRITICAL: 1000
+
+# §24.3: "Alerts: 80% (Paperclip native) → CEO daily report; 100% → agent
+# paused + ntfy." Raising any budget is founder-only, not automatable here.
+alerts:
+  soft_pct: 80
+  hard_pct: 100

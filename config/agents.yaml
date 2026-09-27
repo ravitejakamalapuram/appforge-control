@@ -1,0 +1,103 @@
+# appforge-control/config/agents.yaml
+#
+# The initial seven agents (§6.2), in the shape §29f's example established
+# (extended with a few extra fields — `wakes`, `notes` — that the two-agent
+# example didn't need but §6.2's fuller per-agent tables do).
+#
+# Budgets: sum to 8000 cents ($80) of the $100/mo company cap — the remaining
+# $20 is $15 reserve/overrun + $5 model-eval (see budgets.yaml, §6.2, §28).
+# Concrete model IDs live only in models.yaml — `tier` here just selects
+# LOW/NORMAL/HIGH/CRITICAL, the router (§7) resolves it to a model.
+#
+# RULING on fixed tiers (§7.3, Phase 1): "Only Builder gets a variant
+# initially (others have a fixed tier)." Several §6.2 rows describe a range
+# (e.g. CEO "LOW for daily all-normal, HIGH for portfolio reviews"). Since
+# Phase 1 gives each non-Builder agent exactly one adapter tier, this file
+# picks the higher-stakes tier as the fixed default and leaves a comment
+# citing the lower-cost case from §6.2 — the router's budget-downgrade rule
+# (§7.2: budget < 20% remaining ⇒ drop one tier) already covers cost control
+# within that fixed tier for routine, low-stakes runs.
+
+schema: appforge/agents@1
+
+agents:
+  - name: ceo
+    adapter: claude_local
+    tier: HIGH   # HIGH is the ceiling (portfolio reviews, cross-team conflicts); §6.2 also names LOW for "all-normal" daily reports — that path posts a fixed deterministic template and never calls the model at all (see agents/ceo/HEARTBEAT.md), so it doesn't need its own tier entry here
+    budget_cents: 1500
+    heartbeat:
+      timer: false
+      routines: [daily-0700, weekly-mon-0900]
+      wakes: [mention, approval_resolution]
+    capabilities: [paperclip:company, metrics:read, brain:pr]
+    reports_to: board
+
+  - name: cpo
+    adapter: claude_local
+    tier: NORMAL   # §6.2: NORMAL for research (the bulk of CPO's work); HIGH only for the G2 validation verdict — same Phase-1 fixed-tier tradeoff as CEO above
+    budget_cents: 1200
+    heartbeat:
+      timer: false
+      routines: [weekly-wed-1000]   # opportunity scouting batch, cap 5 opportunities per run (§5.3)
+      wakes: [assignment, mention]
+    capabilities: [web:research, brain:pr, metrics:read]
+    reports_to: ceo
+
+  - name: cto
+    adapter: claude_local
+    tier: HIGH
+    budget_cents: 1500
+    heartbeat:
+      timer: false
+      routines: []
+      wakes: [assignment, mention, "webhook:pr_ready_for_review", "webhook:ci_failed_on_main"]
+    capabilities: [repo:write:platform, repo:write:products, repo:review, ci:read, release:staging, "release:production:approval_gated"]
+    reports_to: ceo
+    notes: "CRITICAL-risk reviews additionally get a codex_local second opinion (independent review) per §6.2/§7.1 — this is the CRITICAL tier's independent_review field in models.yaml, run as a second agent turn, not a separate Paperclip agent identity."
+
+  - name: builder
+    adapter: claude_local
+    tier: NORMAL
+    variants: { high: HIGH }   # the one Phase-1 variant (§7.3): a separate `builder-high` Paperclip agent identity sharing these instruction files but routed to the HIGH model
+    budget_cents: 2000   # largest single consumer of the $80 (§6.2)
+    heartbeat:
+      timer: false
+      routines: []
+      wakes: [assignment, "mention:pr", "mention:issue"]
+      max_concurrent: 1   # VM/laptop has 2 OCPU (§6.2) — do not run a second Builder job concurrently
+    capabilities: [repo:write:assigned, ci:read]
+    reports_to: cto
+
+  - name: qa
+    adapter: claude_local
+    tier: NORMAL   # §6.2: "tests themselves are deterministic" — the LLM here is for test *planning* and evidence write-up, not the test runs
+    budget_cents: 800
+    heartbeat:
+      timer: false
+      routines: []
+      wakes: [handoff_assignment, "webhook:pr_ready"]
+    capabilities: [repo:read, repo:tests-pr, browser:e2e]
+    reports_to: cto
+
+  - name: growth
+    adapter: claude_local
+    tier: NORMAL   # §6.2 also names LOW "for variants" (e.g. A/B copy variants) — same Phase-1 fixed-tier tradeoff as CEO/CPO above
+    budget_cents: 600
+    heartbeat:
+      timer: false
+      routines: [weekly-fri-1000]   # experiment status (§5.3/§6.2)
+      wakes: [assignment]
+    capabilities: [brain:pr, metrics:read, hubsite:pr]
+    reports_to: ceo
+
+  - name: analyst
+    adapter: claude_local
+    tier: NORMAL   # §6.2: "narrative: LOW/NORMAL; all math: scripts" — narrative writing (esp. the weekly board report, §5.3) is the higher-stakes default; the math itself never goes through the router at all (it's in models.yaml's deterministic_tasks: pnl_math)
+    budget_cents: 400
+    heartbeat:
+      timer: false
+      routines: [daily-0630-if-anomalies, weekly-mon-0730]   # daily only fires if the ingest job's anomaly check flags something (§6.2) — otherwise this is a do-nothing wake
+      wakes: []
+    capabilities: [metrics:read, "metrics:ingest:read-only"]
+    reports_to: ceo
+    notes: "Reports to CEO, not Growth/CGO, so measurement stays independent of the team being measured (§5.1)."

@@ -1,0 +1,59 @@
+# appforge-control/config/analytics.yaml
+#
+# Per-product analytics allowlist (§18b/§29f) — one file per product in the
+# eventual design; this is json-workbench's, the only product with an
+# .appforge/ directory today.
+#
+# RULING — this does NOT match §29f's example verbatim, because the example
+# assumes telemetry is already live. json-workbench's actual state says
+# otherwise:
+#   - .appforge/product.yaml: `analytics_project: null` (appforge-edge not
+#     provisioned yet, P1-10) and `data_collection: { collected: [],
+#     transmitted: { endpoints: [] } }`.
+#   - docs/TELEMETRY.md: "Telemetry is intentionally not enabled in the
+#     current release," with an explicit contract for if/when it is added —
+#     no source JSON, query text, paths, file names, pipeline contents,
+#     response bodies, or clipboard data; anonymous feature counts, duration
+#     buckets, parser/worker error classes, and extension version only;
+#     default off, revocable, in-memory bounded queue, dropped on revoke/offline.
+# This file is therefore the DESIGN TARGET for when telemetry ships, built to
+# that contract, not a description of something currently running.
+
+schema: appforge/analytics@1
+
+product: json-workbench
+enabled: false
+endpoint: null   # becomes https://edge.<domain>/v1/events once appforge-edge (P1-10) exists; do not fill in a guessed URL
+
+# Kept inside docs/TELEMETRY.md's allowlist: anonymous feature counts,
+# error classes, and version — nothing content-bearing.
+allowed_events:
+  - app_installed
+  - app_updated
+  - feature_used
+  - feature_failed
+  - error_reported
+
+allowed_props:
+  feature_used:
+    # Matches the product's actual surfaces per .appforge/product.yaml
+    # (DuckDB-WASM pipeline runs, JSON pretty-print, diff view, jq-web query)
+    feature: [pipeline_run, format, diff, query]
+    ok: boolean
+  feature_failed:
+    feature: [pipeline_run, format, diff, query]
+  error_reported:
+    error_class: [parser_error, worker_error, wasm_load_error]   # redacted class only — never the exception message (TELEMETRY.md requirement)
+    fatal: boolean
+
+retention: { raw_days: 90, aggregate_years: 2 }
+
+consent:
+  default: off
+  scope: anonymous_usage_only
+  revocable: true   # queued events must be dropped immediately on revoke or when offline (TELEMETRY.md)
+
+# Before `enabled: true` is ever set: a separate review of the privacy
+# policy, manifest permissions, threat model, and store disclosure is
+# required (docs/TELEMETRY.md's own closing requirement, and §16.3's "any
+# [data classification] change ⇒ risk:high + board approval").

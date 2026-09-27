@@ -1,0 +1,41 @@
+# appforge-control/config/security.yaml
+#
+# High-risk permission list + thresholds for the deterministic gate
+# `appforge security permissions` (§13.2) and the security pipeline (§13.4).
+#
+# §29f's own configuration-example list is an abbreviated version of §13.2's
+# prose list (missing declarativeNetRequestWithHostAccess, tabs, scripting,
+# downloads). This file uses §13.2's fuller prose list as the source of
+# truth, since that's where the permission-governance design is actually
+# specified — the §29f example undercounts it.
+
+schema: appforge/security@1
+
+# Any permission on this list, if added to a shipped manifest, forces
+# risk:high, a CRITICAL review, board approval, and a CWS privacy-tab update
+# task (human) — §13.2.
+high_risk_permissions:
+  - cookies
+  - history
+  - webRequest
+  - webRequestBlocking
+  - declarativeNetRequestWithHostAccess
+  - debugger
+  - tabs                # conditional: high-risk specifically when used to read URLs, not just tab counts/titles (§13.2)
+  - scripting           # conditional: high-risk specifically when combined with broad host permissions below (§13.2)
+  - "<all_urls>"
+  - "*://*/*"
+  - management
+  - downloads
+  - clipboardRead
+  - nativeMessaging
+  - identity
+
+thresholds:
+  fail_on: SEV2
+  secret_scan: gitleaks
+  deps: [npm-audit, osv-scanner]
+
+# §16.2: SEV0/SEV1 notify the founder immediately (ntfy high priority for
+# SEV0); SEV2 goes in the daily report; SEV3 in the weekly.
+notify_founder: [SEV0, SEV1]

@@ -1,0 +1,79 @@
+# appforge-control/config/models.yaml
+#
+# Model routing tiers — master plan §7.1 / §29f. Concrete model IDs and prices
+# live ONLY here (never in agent instruction files under agents/) so swapping
+# vendors/models is a one-file config PR (§7.1).
+#
+# SOURCES (fetched live 2026-09-27 — this is a point-in-time snapshot, not a
+# guess; re-fetch and diff before trusting it again after any noticeable gap):
+#   Anthropic model IDs + pricing: https://platform.claude.com/docs/en/models/overview
+#                                   https://claude.com/pricing
+#   OpenAI model IDs + pricing:    https://developers.openai.com/api/docs/pricing
+#                                   https://developers.openai.com/api/docs/models/gpt-6-astra
+#
+# Both vendors shipped new lineups within the last ~3 months of this file's
+# date (Anthropic: Opus 5.5 GA; OpenAI: GPT-6 Astra/Sol/Luna, announced
+# 2026-09-22) — a strong signal this needs re-checking at least monthly per
+# the §7.3 "model-eval results feed back into models.yaml via monthly PR" rule.
+
+schema: appforge/models@1
+
+tiers:
+  LOW:
+    provider: anthropic
+    model: claude-haiku-4-5          # alias; pinned snapshot is claude-haiku-4-5-20251001
+    fallback: { provider: openai, model: gpt-6-luna }
+    max_tokens: 4000
+    timeout_s: 300
+  NORMAL:
+    provider: anthropic
+    model: claude-sonnet-5
+    fallback: { provider: openai, model: gpt-6-sol }
+    max_tokens: 16000
+    timeout_s: 1800
+  HIGH:
+    provider: anthropic
+    model: claude-opus-5-5           # current Anthropic recommendation for "long-running agentic coding and knowledge work"
+    fallback: { provider: openai, model: gpt-6-astra }
+    max_tokens: 32000
+    timeout_s: 3600
+  CRITICAL:
+    inherit: HIGH
+    independent_review: { provider: openai, model: gpt-6-astra }
+    # RULING (flagging a tension in the master plan, not silently resolving it):
+    # §7.1's prose describes CRITICAL as "strongest available + independent
+    # second-vendor review", which points at claude-fable-5-1 ($10/$50 per
+    # MTok — Anthropic's most capable model). §29f's own config example instead
+    # shows `CRITICAL: { inherit: HIGH, independent_review: {...} }` — i.e. the
+    # *model* stays at HIGH's claude-opus-5-5, and only the independent second
+    # review is added. This file follows §29f's literal shape (as the task
+    # asked for the exact §29f shapes). claude-fable-5-1 is priced below so a
+    # future PR can switch CRITICAL to it (e.g. `model: claude-fable-5-1`
+    # instead of `inherit: HIGH`) if the CEO/CTO decide the prose reading is
+    # what was actually intended — this is a decision for a Decision record,
+    # not something to silently pick in a config file.
+
+# Cents per 1,000,000 tokens (mtok). Filled from the vendor pricing pages
+# above on 2026-09-27 — never guessed. Every model referenced in `tiers`
+# above must have a price row here (P0-06 requirement).
+prices:
+  claude-haiku-4-5:  { input_per_mtok_cents: 100,  output_per_mtok_cents: 500  }   # $1.00 / $5.00 per MTok
+  claude-sonnet-5:   { input_per_mtok_cents: 200,  output_per_mtok_cents: 1000 }   # $2.00 / $10.00 per MTok
+  claude-opus-5-5:   { input_per_mtok_cents: 400,  output_per_mtok_cents: 2000 }   # $4.00 / $20.00 per MTok
+  claude-fable-5-1:  { input_per_mtok_cents: 1000, output_per_mtok_cents: 5000 }   # $10.00 / $50.00 per MTok — not routed to by default; see CRITICAL note above
+  gpt-6-luna:        { input_per_mtok_cents: 10,   output_per_mtok_cents: 50   }   # $0.10 / $0.50 per MTok
+  gpt-6-sol:         { input_per_mtok_cents: 200,  output_per_mtok_cents: 1000 }   # $2.00 / $10.00 per MTok
+  gpt-6-astra:       { input_per_mtok_cents: 1000, output_per_mtok_cents: 5000 }   # $10.00 / $50.00 per MTok
+
+# §7.2/§7.3: these task types must run as a deterministic script/CI job and
+# must never silently fall through to an LLM call (throw UseScriptError instead).
+deterministic_tasks:
+  - json_validation
+  - schema_validation
+  - lint
+  - format
+  - version_compare
+  - pnl_math
+  - ci_check
+  - permission_diff
+  - dependency_scan
