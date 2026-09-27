@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# Claude Code config/login dir for Paperclip agents (personal account). Never commit.
+.claude-appforge/
