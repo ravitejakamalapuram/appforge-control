@@ -35,10 +35,33 @@ completed and is not an all-clear. On `1`, deliver via the courier pattern
 queries — never a write role).
 
 ## Explicit deny list
-- No `GH_TOKEN`, no `GITHUB_APP_*` private keys — Analyst has no repo-write
-  capability at all (not even `brain:pr` — narratives go to CEO for the
-  brain PR).
-- No write access to the metrics ingest DB — read-only role only.
+
+> **This list is cooperative, not enforced.** It describes what a well-behaved
+> agent does; it is not a sandbox. Every agent runs arbitrary Bash as the
+> founder's own OS uid, and **the uid is the only containment boundary** — a
+> process at that uid can reach any issue in this company with no credential
+> and can read the instance's signing keys on disk. Treat each line below as a
+> standing instruction you are accountable for following, not as something that
+> would stop you. Ruling: `DEC-0016` (APP-73). Full model:
+> `docs/containment-model.md`.
+- No `GH_TOKEN`, no `GITHUB_APP_*` private keys in this agent's environment.
+  Analyst is granted no repo capability: `APPFORGE_AGENT_REPOS=none`, so
+  `agent-launch.sh` mints no installation token and scrubs `GH_TOKEN` /
+  `GITHUB_TOKEN` / `GH_ENTERPRISE_TOKEN` before exec. Not even `brain:pr` —
+  narratives go to CEO for the brain PR.
+  **This is a granted-capability statement, not a guarantee of inability.** An
+  earlier version of this line read "Analyst has no repo-write capability at
+  all", which was false: `secrets/appforge-agents.private-key.pem` is readable
+  at this uid, so an Analyst run can mint its own installation token
+  (`scripts/github-app-token.mjs`), and `gh auth git-credential get` still
+  returns a founder token from the OS keyring. Both are listed under
+  `WHAT THIS DOES NOT CLOSE` in `scripts/agent-launch.sh`. **Do not use either.**
+  Reaching for one is a deny-list violation and a reportable finding, not a
+  capability — see `DEC-0013`.
+- No write access to the metrics ingest DB — Analyst is granted the
+  `metrics:ingest:read-only` role only. The role grant is enforced by Postgres
+  *for that role*; it is not a containment boundary, because this uid owns the
+  embedded Postgres data dir and `master.key`. Same rule: do not go around it.
 - No store credentials, no `release-platform` dispatch.
 - No `SOPS_AGE_KEY`, `CLOUDFLARE_API_TOKEN`, `R2_*`, `GUMROAD_ACCESS_TOKEN`,
   `ANDROID_KEYSTORE_*`.

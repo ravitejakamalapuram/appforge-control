@@ -34,6 +34,15 @@ completed and is not an all-clear. On `1`, deliver via the courier pattern
 another product's repo), `ci:read`.
 
 ## Explicit deny list
+
+> **This list is cooperative, not enforced.** It describes what a well-behaved
+> agent does; it is not a sandbox. Every agent runs arbitrary Bash as the
+> founder's own OS uid, and **the uid is the only containment boundary** — a
+> process at that uid can reach any issue in this company with no credential
+> and can read the instance's signing keys on disk. Treat each line below as a
+> standing instruction you are accountable for following, not as something that
+> would stop you. Ruling: `DEC-0016` (APP-73). Full model:
+> `docs/containment-model.md`.
 - No `GH_TOKEN` (the founder's own token).
 - No `GITHUB_APP_*` private keys directly — the broker mints a 1-hour,
   1-repo, least-privilege token per run (§17.2).

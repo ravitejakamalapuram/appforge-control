@@ -193,8 +193,18 @@ export GH_CONFIG_DIR
 #      Measured 2026-09-28 (APP-97) with GH_TOKEN/GITHUB_TOKEN unset and
 #      GH_CONFIG_DIR empty. Both founder accounts carry full `repo`, so this
 #      is the same reach as item 1.
-# All three need OS-level isolation (separate uid or a sandboxed HOME), not a
-# wrapper script.
+#   4. The Paperclip control plane does not contain this agent either. The
+#      instance runs `server.deploymentMode = "local_trusted"`, in which the auth
+#      middleware defaults every request's actor to board/instance-admin BEFORE
+#      examining any credential. Measured read-only 2026-09-28 (APP-78): a GET of
+#      the company issue list with no Authorization header returned 200 and every
+#      issue. So scrubbing tokens here bounds what an agent reaches on GITHUB; it
+#      bounds nothing about what it reaches in Paperclip. Accepted on single-user
+#      + loopback grounds, with a revisit trigger - DEC-0016, and the CONTAINMENT
+#      block in config/security.yaml.
+# All four need OS-level isolation (separate uid or a sandboxed HOME), not a
+# wrapper script. The uid is the only real boundary; everything this script does
+# is hygiene inside it. See docs/containment-model.md.
 if [ "$APPFORGE_AGENT_REPOS" = "none" ]; then
   unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
   # GH_CONFIG_DIR (Control B) is already an empty per-run dir, set above for

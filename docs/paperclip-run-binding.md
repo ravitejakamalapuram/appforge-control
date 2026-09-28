@@ -92,6 +92,36 @@ are the full space you can hit on a write:
 
 Only the first one means *the whole run is dead*. The rest are per-request.
 
+### What this table does not bind: uncredentialed writes
+
+Everything above — including `issue_write_actor_class_excluded`, the
+responsible-user ceiling, the assignee run lock, and the per-run cross-issue cap
+— is evaluated **after** credential verification. An actor that presents **no
+credential at all** is never measured against any of it.
+
+That is not hypothetical here. This instance runs with
+`server.deploymentMode = "local_trusted"`, in which the auth middleware defaults
+every request's actor to board/instance-admin before examining any credential.
+Measured read-only 2026-09-28: `GET /api/companies/<id>/issues` with no
+`Authorization` header returned `200` and every issue in the company.
+
+So read this whole document narrowly. It is an accurate map of **why your
+credentialed agent writes fail and how to fix them** — which is what it was
+written for. It is **not** evidence that these codes contain agents:
+
+- The per-run cross-issue cap is a rate backstop **for credentialed writes**. It
+  counts what it can see.
+- The run-attribution audit trail is **advisory**. An unattributed write is
+  possible, so the trail cannot be relied on to name every actor.
+- The denial copy quoted above says an invalid-run request "could not be
+  contained". Read that as the middleware declining to attribute the request,
+  not as a statement that unattributed writes are prevented.
+
+The actual containment boundary is the OS uid. Ruling: `DEC-0016` (APP-73).
+Full model: `docs/containment-model.md`. **Do not probe the unauthenticated
+write path** — the mechanism is established, and a write probe would itself
+create the unattributed write `DEC-0016` records as an accepted cost.
+
 ## Is it intermittent?
 
 No. It is **deterministic per run**, decided before the run does any work.
