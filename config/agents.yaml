@@ -160,7 +160,23 @@ agents:
     max_turns_per_run: 40
     heartbeat:
       timer: false
-      routines: [daily-0630-if-anomalies, weekly-mon-0730]   # daily only fires if the ingest job's anomaly check flags something (§6.2) — otherwise this is a do-nothing wake
+      # RULING (APP-50): `daily-0630-if-anomalies` is REMOVED from this list, not
+      # deferred in place. §6.2 gates it on "the ingest job's deterministic
+      # anomaly check" — and that check does not exist. There is no ingest to
+      # read (config/analytics.yaml is `enabled: false`, endpoint null, pending
+      # appforge-edge/P1-10) and no evaluator to flag with (APP-43 owns
+      # `appforge metrics digest`, and is blocked). A routine whose only trigger
+      # condition can never be true either does not fire, or fires
+      # unconditionally and spends a model call to conclude nothing — the exact
+      # polling shape the APP-39 ruling above rejected on cost grounds, against
+      # the smallest budget in the company (400 cents).
+      #
+      # This file must describe the control plane, not aspire to it: it claimed
+      # six routines where five existed. Restore this entry in the SAME commit
+      # that creates the routine, once APP-43 ships a digest that can set an
+      # anomaly flag. See agents/analyst/HEARTBEAT.md for the wake's contract,
+      # which is unchanged and still correct for that future state.
+      routines: [weekly-mon-0730]
       wakes: []
     capabilities: [metrics:read, "metrics:ingest:read-only"]
     reports_to: ceo
