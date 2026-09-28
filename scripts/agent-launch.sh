@@ -19,11 +19,26 @@
 #               agents read the AppForge-owned .gitconfig-appforge instead of
 #               the founder's ~/.gitconfig (`!gh auth git-credential`) and
 #               Apple's system gitconfig (`osxkeychain`).
-#   Control B - GH_CONFIG_DIR, a per-run empty dir, so `gh` has no logged-in
-#               founder account to return - by PATH, by absolute path, via a
-#               config helper, or invoked directly.
-# A removes the config path that CALLS the helper; B removes the authenticated
-# state the helper READS. Neither is sufficient alone. See the APP-60 plan.
+#   Control B - GH_CONFIG_DIR, a per-run empty dir, so `gh` itself has no
+#               logged-in founder account to act as: `gh auth status`, `gh api`
+#               and `gh pr` see no host, whether gh is reached by PATH or by
+#               absolute path.
+#
+# These two are NOT equal partners, and an earlier version of this comment had
+# it backwards (APP-97). Measured per-control, 2026-09-28:
+#
+#   no containment          -> git credential fill returns a founder token
+#   Control A alone         -> no credential. SUFFICIENT.
+#   Control B alone         -> git credential fill returns a founder token.
+#                              NOT sufficient.
+#
+# A is what closes C3, on its own: it resets the accumulated credential.helper
+# list so no git operation can reach a founder credential. B is hygiene layered
+# on top - it keeps gh from acting as a founder ACCOUNT. B does not remove the
+# authenticated state the helper reads: that state lives in the OS keyring, not
+# in GH_CONFIG_DIR (~/.config/gh/hosts.yml carries no oauth_token). Do not relax
+# A on the belief that B still holds the line; it does not. See the APP-60
+# plan, and item 3 under WHAT THIS DOES NOT CLOSE.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,9 +102,13 @@ export GIT_CONFIG_NOSYSTEM=1
 # release-platform pipeline, DEC-0005) and the employer account (repo on every
 # private repo that account can reach).
 #
-# Control A alone does not close this. A removes the config entry that calls
-# `gh auth git-credential`; the authenticated state it reads lives here, and
-# `gh` stays executable at its absolute path regardless of PATH hygiene.
+# Control A does not cover this. A resets git's credential.helper list, which
+# is what closes C3; it does nothing about `gh` invoked as a CLI in its own
+# right, which stays executable at its absolute path regardless of PATH
+# hygiene. What this dir removes is the ACCOUNT LIST (hosts.yml) that gh reads
+# to decide who it is - not the credential itself, which is in the OS keyring
+# and remains reachable via `gh auth git-credential get` (APP-97, item 3 under
+# WHAT THIS DOES NOT CLOSE).
 #
 # Prefer Paperclip's run scratch dir - it is per-run and the runtime deletes it
 # when the run ends. mktemp is the fallback for non-Paperclip invocations. A
@@ -125,6 +144,13 @@ export GH_CONFIG_DIR
 # accounts as logged in; with GH_CONFIG_DIR also pointed at an empty dir it
 # reports "not logged into any GitHub hosts".
 #
+# Read that second result narrowly. `gh auth status` reads hosts.yml, so an
+# empty GH_CONFIG_DIR only hides the accounts from `status` - it does NOT
+# establish that gh holds no credential. Measured 2026-09-28 (APP-97) in that
+# exact environment, `gh auth git-credential get` invoked directly still
+# returned a founder `gho_` token, because that subcommand reads the OS keyring
+# and never needs hosts.yml. `status` is the wrong probe for this question.
+#
 # So: scrub the env tokens AND give gh a private, empty config dir. The dir is
 # Control B above, which now applies to every path; only the env-token scrub
 # below is specific to this branch.
@@ -159,12 +185,20 @@ export GH_CONFIG_DIR
 #   2. ~/.ssh holds keys that can push to any repo the founder can, and the
 #      product repos' git remotes are switchable to ssh. This wrapper only
 #      governs https; an agent that rewrites a remote to ssh bypasses it.
-# Both need OS-level isolation (separate uid or a sandboxed HOME), not a
+#   3. `gh auth git-credential get`, invoked directly as a binary, returns a
+#      founder `gho_` user token from the OS keyring regardless of
+#      GH_CONFIG_DIR - the keyring is not what GH_CONFIG_DIR points at.
+#      Measured 2026-09-28 (APP-97) with GH_TOKEN/GITHUB_TOKEN unset and
+#      GH_CONFIG_DIR empty. Both founder accounts carry full `repo`, so this
+#      is the same reach as item 1.
+# All three need OS-level isolation (separate uid or a sandboxed HOME), not a
 # wrapper script.
 if [ "$APPFORGE_AGENT_REPOS" = "none" ]; then
   unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
   # GH_CONFIG_DIR (Control B) is already an empty per-run dir, set above for
-  # every path. With the env tokens also scrubbed, gh has nothing at all.
+  # every path. With the env tokens also scrubbed, gh will not ACT as any
+  # account by default. It is not stripped of credentials - see item 3 under
+  # WHAT THIS DOES NOT CLOSE.
   #
   # No extraheader here: this agent gets no token, so git https to github.com
   # must fail closed rather than fall through to the keychain.
