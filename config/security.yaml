@@ -71,6 +71,18 @@ notify_founder: [SEV0, SEV1]                   # severities that MUST reach the 
 # trail bind credentialed writes only. Ruling: DEC-0016 (APP-73, board approval
 # e028e2f9). Full model: docs/containment-model.md.
 #
+# Same category, added APP-134 (measured 2026-09-29): appforge-brain's
+# `board-approved` label gate in .github/workflows/pr-checks.yml is an ADVISORY
+# CHECK RUN, not a merge block. `main` reads protected: false and
+# required_status_checks.enforcement_level: "off" on both brain and control, and
+# rulesets are unavailable on this plan for a private repo (403 "Upgrade to
+# GitHub Pro or make this repository public" here vs 200 [] on the account's
+# public repo appforge-kit, same token). Neither repo has server-side merge
+# gating; brain just has a check that shouts. The gate has never been bypassed,
+# but that is agent discipline, not the server. Do not describe it as enforced.
+# Enabling branch protection needs a paid plan or public repos - founder call,
+# tracked on APP-123, NOT an engineering task.
+#
 # >>> REVISIT TRIGGER — DEC-0016 IS VOID IMMEDIATELY IF ANY OF THESE IS TRUE <<<
 #   1. `server.bind` is no longer `loopback`, or `server.host` is no longer
 #      `127.0.0.1` (i.e. the instance is reachable off this host).
