@@ -38,8 +38,43 @@ schema: appforge/agents@1
 # (DEC-0004 unchanged). A turn cap only decides whether a run finishes its
 # work or is killed partway through; `budget_cents` decides what it may spend.
 # The router's budget-downgrade rule (§7.2) is untouched.
+#
+# Run concurrency ceiling and timer heartbeats (APP-39). `heartbeat.timer` and
+# `heartbeat.max_concurrent` below map onto Paperclip's
+# `runtimeConfig.heartbeat.{enabled,maxConcurrentRuns}`.
+#
+# RULING: `timer: false` stays false for all seven agents in Phase 1. It is not
+# a misconfiguration. Grounds:
+#
+#   * `enabled` gates ONLY `source === "timer"`. Every other wake source
+#     (assignment, comment, mention, approval, webhook, routine) is gated by a
+#     different field, `wakeOnDemand`, which defaults to TRUE when absent. So
+#     `enabled: false` does not stop any wake this company actually relies on.
+#   * Scheduled work arrives through routines, not timers, and routines already
+#     fire with `enabled: false` - the daily/weekly CEO, Analyst, CPO and Growth
+#     routines are `active` in the control plane and have created real execution
+#     issues. The `routines:` list under each agent below IS the schedule.
+#   * Turning timers on needs TWO gates, not one: the scheduler loop requires
+#     `enabled && intervalSec > 0`. Setting `enabled: true` alone changes
+#     nothing, so "flip enabled" was never a one-line fix.
+#   * Cost: a timer wake spends a model call even when the do-nothing rule
+#     (Sec 6.1 rule 2) means the run posts nothing. At $80/mo across seven
+#     agents (DEC-0004) polling is the wrong shape for this company.
+#
+# If Phase 2 ever wants timers, set `timer: true` AND an interval, and pair it
+# with Paperclip's `skipTimerWhenNoActionableWork` (suppresses a generic timer
+# wake when the agent has no todo/in_progress issue) plus the per-agent
+# `maxDailyRuns` / `maxDailyCostCents` caps. Do not enable timers without them.
+#
+# `max_concurrent` is a real per-agent ceiling on how many QUEUED runs may be
+# promoted to running at once. Paperclip's own default is 20, which is what
+# every agent inherited at creation - nobody chose it. 20 concurrent runs at a
+# 40-60 turn cap is an indefensible ceiling on a 2-OCPU laptop, so this file
+# now states a number per agent. Over-ceiling wakes QUEUE, they are not
+# dropped, which is what makes a low ceiling safe. Valid range is 1-50.
 defaults:
   max_turns_per_run: 40
+  max_concurrent: 2   # one long run in flight plus one event wake (approval resolution, CI webhook), without letting a pile-up fan out into N simultaneous sessions
 
 agents:
   - name: ceo
@@ -89,7 +124,7 @@ agents:
       timer: false
       routines: []
       wakes: [assignment, "mention:pr", "mention:issue"]
-      max_concurrent: 1   # VM/laptop has 2 OCPU (§6.2) — do not run a second Builder job concurrently
+      max_concurrent: 1   # VM/laptop has 2 OCPU (§6.2) — do not run a second Builder job concurrently. Declared since P0-06 but never applied to the control plane until APP-39 built the reconciler; Builder was running at Paperclip's default of 20.
     capabilities: [repo:write:assigned, ci:read]
     reports_to: cto
 
@@ -102,6 +137,7 @@ agents:
       timer: false
       routines: []
       wakes: [handoff_assignment, "webhook:pr_ready"]
+      max_concurrent: 1   # holds a browser e2e session and a repo checkout - two concurrent runs would collide on the same workspace
     capabilities: [repo:read, repo:tests-pr, browser:e2e]
     reports_to: cto
 
