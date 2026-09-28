@@ -48,8 +48,9 @@ another product's repo), `ci:read`.
   1-repo, least-privilege token per run (§17.2).
 - No store credentials, no `release-platform` dispatch of any kind.
 - No pushing to `main` — draft PR only, per the fixed workflow.
-- No adding manifest permissions — blocked by the `permission-diff` gate
-  regardless, but never attempt it.
+- No adding manifest permissions. The `permission-diff` gate fails the
+  check and makes the attempt visible; it does not prevent the merge.
+  Never attempt it.
 - No `SOPS_AGE_KEY`, `CLOUDFLARE_API_TOKEN`, `R2_*`, `GUMROAD_ACCESS_TOKEN`,
   `ANDROID_KEYSTORE_*`.
 - No editing `SOUL.md` files — its own or any other agent's.
