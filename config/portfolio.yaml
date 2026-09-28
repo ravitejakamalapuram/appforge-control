@@ -1,0 +1,1342 @@
+# appforge-control/config/portfolio.yaml
+#
+# Kill/scale policy defaults, named by master plan §22.1 ("defaults in
+# `config/portfolio.yaml`") but never written. Proposed by Analyst under
+# APP-35; CTO reviews the file shape, CEO owns the threshold values
+# (they are restated from §22.1/§22.2 verbatim, not re-derived here).
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS FILE IS FOR
+# ---------------------------------------------------------------------------
+# §22.1 requires the SCALE/ITERATE/PAUSE/SUNSET recommendation to be
+# "computed by script from metrics before the CEO sees narrative". That is an
+# anti-sunk-cost control: the number decides first, the story comes second.
+# It is not in force today because no such script and no such config exist.
+#
+# This file is the script's input. It is DECLARATIVE ONLY — every rule states
+# the metrics it requires and the comparison it makes; no logic lives here.
+#
+# ---------------------------------------------------------------------------
+# THE ONE DESIGN RULE THAT MATTERS
+# ---------------------------------------------------------------------------
+# A metric we do not have is NEVER treated as zero, as false, or as failing.
+# A rule whose required metrics are missing, stale, or below the minimum
+# sample size is `undecidable`. If any rule is undecidable and no rule fires,
+# the product's outcome is `insufficient_data` — which names the exact
+# metrics that were missing and why.
+#
+# There is no default outcome and no fallthrough. `default_outcome: null` is
+# deliberate: a script that cannot decide must say so, not guess quietly.
+#
+# ---------------------------------------------------------------------------
+# REVISION 2 — DEC-0009 APPLIED
+# ---------------------------------------------------------------------------
+# Revision 1 shipped with five defects recorded but undecided (`spec_defects`
+# D1-D5). On 2026-09-28 the CEO ruled all five in
+# `appforge-brain/decisions/DEC-0009-portfolio-measurement-rulings.md`. This
+# revision encodes those rulings. Every one of them is recorded ON THE CLAUSE
+# IT AFFECTS, with its derivation, so that no reader has to reconstruct the
+# reasoning from a comment thread or a decision file.
+#
+# What the rulings changed here:
+#   D1 -> `contribution > 0` guard kept, plus a NEW second clause
+#         `sunset_maintenance_ceiling` with an absolute $6.00/month ceiling;
+#         `maintenance_cost_monthly` redefined to exclude founder hours.
+#   D2 -> `insufficient_data` accepted as the honest output; a STRUCTURAL
+#         invariant now forbids any store-only rule from producing SUNSET or
+#         SCALE; `output_contract` makes the evaluator print the
+#         "not a freeze" line verbatim; `sunset_unresolvable_risk` is wired
+#         to real inputs instead of asserting false.
+#   D3 -> a whole new `allocation` section: renormalisation, a stamped
+#         coverage fraction, a 0.7 coverage floor that withholds the growth
+#         pool, a 0.25 cap on `strategic`, and maintenance_burden admitted
+#         as a DECLARED proxy. D30 retention may never be proxied.
+#   D5 -> `platform_rule_sets`: Android WAU clauses return
+#         `insufficient_data` with the named reason `play_wau_unavailable`.
+#         No aliasing. Android thresholds are a follow-up on APP-42.
+#   O2 -> baseline stays provisional [3, 5], `certified: false`; the goal
+#         restatement is founder-approval content on APP-55 and is
+#         REFERENCED here, never edited here.
+#
+# What the rulings did NOT change: no product's outcome moves today. Both
+# maintenance clauses stay undecidable, ITERATE stays unreachable, and the
+# first several monthly allocations run base-maintenance-only by design.
+# ---------------------------------------------------------------------------
+
+schema: appforge/portfolio@1
+version: 2
+owner: analyst          # proposes and maintains thresholds' measurability classes
+approver: ceo           # threshold VALUES are §22.1/§22.2 text; changing them is a plan change
+last_reviewed: "2026-09-28"
+
+rulings_applied:
+  - id: DEC-0009
+    date: "2026-09-28"
+    ruled_by: ceo
+    file: "appforge-brain/decisions/DEC-0009-portfolio-measurement-rulings.md"
+    covers: [D1, D2, D3, D5, O2]
+    review_date: "2026-11-30"
+
+# ===========================================================================
+# 1. EVALUATION CALENDAR
+# ===========================================================================
+evaluation:
+  # §22.1: "Evaluated at day 30/60/90 post-launch and quarterly after".
+  checkpoints_days: [30, 60, 90]
+  then: quarterly
+
+  # BLOCKING GAP: the day-N clock has no origin today. None of the nine
+  # .appforge/product.yaml files records a launch date. `first_published`
+  # must be added to each before any checkpoint can be computed.
+  clock_source: first_published
+
+  # A product that is not publicly published has no store metrics by
+  # construction, and §22.1 is explicitly a POST-LAUNCH policy. Evaluating it
+  # is a category error, not a data gap — hence a separate outcome.
+  applies_when:
+    store_item_status: published
+  # store_item_status ∈ [published, draft, unlisted, internal_track, unpublished]
+  # — second required new field in .appforge/product.yaml.
+
+# ===========================================================================
+# 2. OUTCOMES
+# ===========================================================================
+outcomes:
+  - SCALE              # §22.2
+  - ITERATE            # §22.1
+  - PAUSE              # §22.1
+  - SUNSET             # §22.1 (candidate — board approval still required, §22 diagram 12)
+  - CONTINUE           # every rule decidable, none fired. A positive finding.
+  - insufficient_data  # ≥1 rule undecidable and none fired. Names the gaps.
+  - not_applicable     # pre-launch / not published. Policy does not apply.
+
+default_outcome: null   # see header. Never add one.
+
+precedence:
+  - not_applicable
+  - SUNSET
+  - SCALE
+  - ITERATE
+  - PAUSE
+  - insufficient_data
+  - CONTINUE
+# Note: insufficient_data sits BELOW the firing rules on purpose. If a rule
+# fires on metrics that are all sufficient, that verdict stands even when a
+# lower-precedence rule was undecidable. It sits ABOVE CONTINUE because
+# "we checked and found nothing" and "we could not check" are different
+# statements and must never be reported as the same thing.
+
+# ===========================================================================
+# 2a. REASON CODES — DEC-0009 D5: a named reason, never a silent fall-through
+# ===========================================================================
+# Every non-verdict outcome (`insufficient_data`, `not_applicable`) and every
+# undecidable rule MUST carry at least one reason code from this registry.
+# A reason code that is not registered here is a validator failure, not a
+# free-text note. This is what stops "undecidable" from becoming a shrug.
+reason_codes:
+  metric_missing:          "Required metric has no value at all."
+  metric_stale:            "Required metric exists but is older than its max_age_days."
+  metric_below_min_n:      "Required metric is present and fresh, but n is below min_n for the comparison the rule makes."
+  metric_needs_telemetry:  "Required metric is MEASURABLE_AFTER_TELEMETRY and telemetry is not shipped."
+  metric_not_measurable:   "No mechanism exists to obtain this metric at all."
+  insufficient_history:    "Metric exists but the rule needs more consecutive periods than have been observed."
+  play_wau_unavailable:    "Android product, and Play Console publishes no 7-day distinct-active figure. The clause is written in WAU and has no store-side equivalent on this platform. See platform_rule_sets.android and spec_defects.D5."
+  first_published_null:    "The day-30/60/90 clock has no origin for this product."
+  not_published:           "store_item_status is not `published`; §22.1 is a post-launch policy."
+  thresholds_not_set:      "A rule set applies to this platform but its threshold values have not been ruled on yet."
+
+# ===========================================================================
+# 3. METRICS
+# ===========================================================================
+# measurability ∈
+#   MEASURABLE_NOW              — obtainable from stores/first-party records,
+#                                 zero product code change
+#   MEASURABLE_AFTER_TELEMETRY  — needs in-product events (§18b taxonomy);
+#                                 shipping it is a privacy/store-disclosure
+#                                 change and a board decision, not a config change
+#   NOT_MEASURABLE_AT_SCALE     — instrumented or not, n is too small for the
+#                                 quantity to exist
+#   NOT_MEASURABLE              — no mechanism exists at all
+#
+# `measurability` is a statement about the CLASS of the quantity, not about
+# whether the pipeline that carries it has been built. "The plumbing is not
+# built yet" is expressed by `available_today: false` on the metric and by
+# `blocked_by` on the rule. Keeping those two ideas apart is what lets the
+# script distinguish "nobody ran the export" from "this can never be known".
+#
+# `origin` ∈ [store, first_party_records, telemetry, evaluation_history,
+# not_measurable] — REQUIRED on every metric. It exists so the store-only
+# invariant in section 5a can be checked mechanically rather than trusted.
+#
+# max_age_days: past this, the metric is `stale` and every rule requiring it
+# becomes undecidable. This is what makes "nobody ran the weekly export"
+# visible instead of silent.
+#
+# min_n: below this, the metric exists but cannot support the comparison the
+# rule makes. See `noise_floor` for the derivation.
+
+metrics:
+
+  # ---- Chrome Web Store, per item, from the Developer Dashboard export ----
+  cws_weekly_users:
+    source: cws_dashboard_export
+    field: "Weekly users"
+    origin: store
+    cadence: weekly
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+    available_today: false      # no export in hand yet — APP-42
+    definition_warning: |
+      This is NOT §18b's WAU. §18b defines WAU as distinct install_id with ≥1
+      telemetry event in 7 days — a measure of USE. The store's "weekly users"
+      is an estimate of installations that checked in with Chrome in the last
+      7 days — a measure of INSTALLED-AND-ONLINE. Every §22.1 threshold
+      written as "WAU" is scored against the store figure here, which is the
+      looser of the two and will read HIGHER than true WAU. Treat any
+      store-WAU pass as an upper bound, never as evidence of engagement.
+
+  cws_installs:
+    source: cws_dashboard_export
+    origin: store
+    cadence: weekly
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+
+  cws_uninstalls:
+    source: cws_dashboard_export
+    origin: store
+    cadence: weekly
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+
+  cws_listing_page_views:
+    source: cws_dashboard_export
+    origin: store
+    cadence: weekly
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+
+  cws_impressions:
+    source: cws_dashboard_export
+    origin: store
+    cadence: weekly
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+
+  cws_rating_average:
+    source: cws_dashboard_export
+    origin: store
+    cadence: weekly
+    max_age_days: 30
+    measurability: MEASURABLE_NOW
+
+  cws_rating_count:
+    source: cws_dashboard_export
+    origin: store
+    cadence: weekly
+    max_age_days: 30
+    measurability: MEASURABLE_NOW
+
+  # ---- Derived from the above; no new source ----
+  store_listing_conversion:
+    derived: "cws_installs / cws_listing_page_views"
+    origin: store
+    measurability: MEASURABLE_NOW
+    note: "Already in use as EXP-0001's primary metric (baseline 0.021)."
+
+  uninstall_rate_7d:
+    derived: "cws_uninstalls_7d / cws_installs_7d"
+    origin: store
+    measurability: MEASURABLE_NOW
+    note: "EXP-0001 guardrail."
+
+  wau_growth_monthly:
+    derived: "trailing 4-week mean of cws_weekly_users, month over month"
+    origin: store
+    measurability: MEASURABLE_NOW
+    available_today: false
+    min_n: 30            # see noise_floor
+    min_history_weeks: 12
+    note: |
+      A trailing mean, not a point reading. A single weekly observation
+      cannot support a growth claim — see noise_floor.observed. We have 0
+      weeks of export history for any product, so this is unrealised today
+      and contributes 0 to allocation coverage (see allocation.coverage).
+
+  wau_flat_60d:
+    derived: "max/min of trailing 4-week mean over 60d within ±10%"
+    origin: store
+    measurability: MEASURABLE_NOW
+    available_today: false
+    min_n: 30
+    min_history_weeks: 12
+
+  # ---- Google Play, per app ----
+  play_active_devices_30d:
+    source: play_reports_bucket
+    origin: store
+    cadence: daily
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+    available_today: false
+    definition_warning: |
+      ASYMMETRY WITH CWS — Play's statistics reports have no 7-day distinct
+      active figure. Daily active devices cannot be summed into a weekly
+      distinct count. So for InvTrack and TelePort (Android) there is NO
+      store-reported equivalent of "WAU".
+    ruling: |
+      DEC-0009 D5 REJECTED substituting this metric into a WAU threshold.
+      It is a THIRD quantity, distinct from both `cws_weekly_users` and
+      `true_wau`: three quantities, three names, no aliasing between any
+      pair of them. See forbidden_aliases and platform_rule_sets.android.
+
+  play_installs:
+    source: play_reports_bucket
+    origin: store
+    cadence: daily
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+
+  play_uninstalls:
+    source: play_reports_bucket
+    origin: store
+    cadence: daily
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+
+  play_rating_average: { source: play_reports_bucket, origin: store, cadence: daily, max_age_days: 30, measurability: MEASURABLE_NOW }
+  play_crash_rate:     { source: play_developer_reporting_api, origin: store, cadence: daily, max_age_days: 14, measurability: MEASURABLE_NOW }
+  play_anr_rate:       { source: play_developer_reporting_api, origin: store, cadence: daily, max_age_days: 14, measurability: MEASURABLE_NOW }
+
+  # ---- Economics (§21.1) ----
+  attributable_ai_cost:
+    source: paperclip_cost_events
+    origin: first_party_records
+    unit: usd_per_product_month
+    cadence: continuous
+    max_age_days: 2
+    measurability: MEASURABLE_NOW
+    available_today: true
+    note: |
+      The one maintenance-cost input available today with no new access.
+      Paperclip cost events carry the product they were incurred against.
+
+  attributable_infra_cost:
+    source: cloudflare_billing
+    origin: first_party_records
+    unit: usd_per_product_month
+    cadence: monthly
+    max_age_days: 45
+    measurability: MEASURABLE_NOW
+    available_today: false
+    gap: |
+      NAMED GAP, not a zero. Infra today is shared — appforge-edge Workers,
+      R2 and D1 bill as one line, not per product — so there is no per-product
+      infra figure to read. Splitting it is a build, not a measurement
+      problem, which is why the class is MEASURABLE_NOW and the availability
+      is false. Until the split exists this component is MISSING, and by the
+      one design rule at the top of this file that makes every rule requiring
+      `maintenance_cost_monthly` undecidable. It does NOT default to 0.
+    blocks: [maintenance_cost_monthly]
+
+  maintenance_cost_monthly:
+    derived: "attributable_ai_cost + attributable_infra_cost"
+    origin: first_party_records
+    unit: usd_per_product_month
+    measurability: MEASURABLE_NOW
+    available_today: false
+    excludes: founder_hours
+    ruling: |
+      DEC-0009 D1 defines maintenance cost as attributable AI spend (Paperclip
+      cost events) plus attributable infra. Revision 1 derived it as
+      `ai_cost + infra + support_cost` and inherited support_cost's
+      NOT_MEASURABLE class from the missing founder-hours mechanism, which
+      made the whole quantity permanently unknowable. Dropping founder hours
+      from the definition is what makes the clause encodable at all.
+    excludes_note: |
+      `excludes: founder_hours` is carried on this metric's face, not in a
+      comment elsewhere, because it changes what the number MEANS. Founder
+      time is a real maintenance cost and it is not in here. Therefore this
+      figure is a LOWER BOUND on true maintenance cost, and the $6.00 ceiling
+      in `sunset_maintenance_ceiling` is correspondingly CONSERVATIVE: it will
+      fire later than a true-cost ceiling would, never earlier. That is the
+      safe direction for a clause whose outcome is SUNSET, and it is the
+      reason this exclusion is acceptable rather than merely convenient.
+    renamed_from: maintenance_cost
+    rename_reason: |
+      Renamed in revision 2 to carry its unit in its name. DEC-0009 D1 states
+      the new clause as `maintenance_cost_monthly > 6.00`; a quantity compared
+      against a per-month ceiling should not be named as if it were a total.
+      No alias is kept — see forbidden_aliases.
+
+  net_revenue:
+    source: [gumroad_sales_api, play_earnings_report]
+    origin: first_party_records
+    unit: usd_per_product_month
+    cadence: monthly
+    max_age_days: 45
+    measurability: MEASURABLE_NOW
+    note: "Trivially 0 for the 7 free products. Non-trivial only for echokit (Gumroad) and, once live, teleport/invtrack."
+
+  support_cost:
+    source: founder_hours_log
+    origin: not_measurable
+    measurability: NOT_MEASURABLE
+    note: |
+      §21.1 requires "founder minutes on support × shadow rate". The master
+      plan's own §29f Missing-requirements list names "founder-hours
+      measurement mechanism" as absent. Nothing logs founder minutes. The
+      shadow rate defaults to $0, which would make support_cost 0 — but 0 by
+      absence of a rate is not 0 by measurement, so this is NOT_MEASURABLE,
+      not zero.
+    no_longer_required_by: [maintenance_cost_monthly]
+    still_required_by: [contribution]
+
+  contribution:
+    derived: "net_revenue - attributable_ai_cost - attributable_infra_cost - marketing - support_cost - other"
+    origin: first_party_records
+    unit: usd_per_product_month
+    measurability: MEASURABLE_NOW
+    caveat: |
+      Computable only because support_cost is currently forced to 0 by a $0
+      shadow rate. The figure is therefore a CEILING on contribution (real
+      contribution is lower by however many founder hours went in). Report it
+      as such. For every free product it is ≤ 0 by construction: revenue is 0
+      and attributable_ai_cost is > 0.
+    asymmetry_note: |
+      Note the two bounds point opposite ways and BOTH are conservative for
+      SUNSET: contribution is an upper bound (real is lower) and
+      maintenance_cost_monthly is a lower bound (real is higher). A clause
+      that compares them therefore UNDER-states how bad a product looks, so
+      it cannot produce a SUNSET candidate that better data would retract.
+      This is deliberate; if the bounds are ever tightened, re-check that the
+      direction still favours not sunsetting.
+
+  sustained_quarters:
+    definition: "Count of consecutive CLOSED fiscal quarters in which a clause's other conditions all held."
+    source: portfolio_evaluation_history
+    origin: evaluation_history
+    measurability: MEASURABLE_NOW
+    available_today: false
+    min_history_quarters: 2
+    note: |
+      No portfolio evaluation history exists — this file and the evaluator are
+      being built now, so the earliest quarter that can be counted is 2026Q4.
+      Two consecutive closed quarters therefore cannot exist before 2027Q1 at
+      the very earliest. Both maintenance clauses are gated on this, which is
+      the structural reason DEC-0009 could rule on them without changing any
+      product's outcome today.
+
+  revenue_path_validated:
+    source: [brain_experiments, product_yaml_monetization]
+    origin: first_party_records
+    measurability: MEASURABLE_NOW
+    definition: |
+      TRUE iff either (a) contribution > 0 in any completed month, or (b) a
+      completed monetization experiment in appforge-brain/experiments/ records
+      paid conversion ≥ 0.01 (§22.2's "validated monetization test"). Today
+      FALSE for all nine — no experiment has completed and no month has closed.
+
+  unresolvable_policy_or_security_risk:
+    source: [open_incidents, security_classification, store_review_status]
+    origin: first_party_records
+    measurability: MEASURABLE_NOW
+    available_today: true
+    definition: "An open SEV0–SEV2 incident, or an open store enforcement action, attributable to this product and carrying no accepted remediation plan."
+    inputs:
+      open_incidents:
+        resolves_to: |
+          Paperclip issues carrying `type:incident` whose idempotency key
+          matches `inc:<product>:*` (§23), in a non-terminal status, with
+          severity in [SEV0, SEV1, SEV2] per config/security.yaml
+          (`thresholds.fail_on: SEV2`). "Accepted remediation plan" means the
+          incident has an owner and a linked fix issue that is not itself
+          blocked-with-no-owner.
+        available_today: true
+        note: "The query is live today — zero matching incidents is a MEASURED zero, not an assumed one."
+      security_classification:
+        resolves_to: ".appforge/product.yaml `security_classification` ∈ [low, medium, high]. `high` alone is not a risk event; it raises the bar for what counts as an accepted remediation plan (§13.2 CRITICAL review + board approval)."
+        available_today: true
+        note: "Present and populated on all nine product.yaml files."
+      store_review_status:
+        resolves_to: "An open CWS or Play enforcement/rejection action against the item."
+        available_today: false
+        reason_code: metric_missing
+        note: |
+          No store-side feed exists yet (APP-42). By the one design rule this
+          makes the INPUT missing — but see `partial_evaluation` below.
+    partial_evaluation:
+      allowed: true
+      rule: |
+        This metric evaluates TRUE if ANY available input shows an
+        unresolvable risk, even when another input is missing. It evaluates
+        FALSE only when EVERY input is available and none shows risk. With
+        store_review_status missing, the metric can therefore return TRUE or
+        `undecidable`, never FALSE.
+      why: |
+        DEC-0009 D2 requires this clause be wired to real inputs rather than
+        hardcoded false. Revision 1 asserted "currently false for all nine",
+        which is exactly the silent default this file forbids everywhere else.
+        A disjunction is the one shape where partial data is still decisive in
+        one direction: if an open SEV1 exists, the missing store feed cannot
+        make it not exist. Being unable to clear a product is not the same as
+        finding it at risk, and the two are now reported differently.
+      today: |
+        open_incidents returns zero matching incidents for all nine products
+        (measured), security_classification is `low` or `medium` for all nine
+        (measured), store_review_status is missing. So the clause is
+        `undecidable` with reason_code metric_missing — NOT false. No product
+        is cleared and no product is flagged.
+
+  # ---- Requires telemetry that does not exist ----
+  activation:
+    definition: "§18b — installs firing onboarding_completed or first feature_used{ok} within 24h ÷ installs"
+    origin: telemetry
+    measurability: MEASURABLE_AFTER_TELEMETRY
+    also: NOT_MEASURABLE_AT_SCALE
+    note: |
+      Both apply, and the order matters. Even with telemetry shipped tomorrow,
+      json-workbench's 3–5 users make an activation RATE meaningless: one user
+      moves it 20–33 points. Shipping telemetry does not make this measurable;
+      it makes it measurable ONCE THE BASE IS LARGE ENOUGH. See min_n.
+
+  retention_d1:  { definition: "§18b cohort D1",  origin: telemetry, measurability: MEASURABLE_AFTER_TELEMETRY, also: NOT_MEASURABLE_AT_SCALE }
+  retention_d7:  { definition: "§18b cohort D7",  origin: telemetry, measurability: MEASURABLE_AFTER_TELEMETRY, also: NOT_MEASURABLE_AT_SCALE }
+
+  retention_d30:
+    definition: "§18b cohort D30"
+    origin: telemetry
+    measurability: MEASURABLE_AFTER_TELEMETRY
+    also: NOT_MEASURABLE_AT_SCALE
+    never_proxy: true
+    never_proxy_ruling: |
+      DEC-0009 D3: "Never proxy D30 retention with anything." This is
+      absolute and has no exception clause. D30 retention carries 0.2 of §22's
+      allocation weight; that weight stays UNREALISED and lowers coverage
+      rather than being filled by a stand-in. Any future proposal to
+      substitute a store metric, a survey, an uninstall-rate complement, or a
+      modelled estimate for this quantity is a DEC-0009 violation and must go
+      back to the CEO, not into this file.
+
+  true_wau:
+    definition: "§18b — distinct install_id with ≥1 event in 7 days"
+    origin: telemetry
+    measurability: MEASURABLE_AFTER_TELEMETRY
+    note: "Kept distinct from cws_weekly_users and play_active_devices_30d on purpose. Do not alias any of the three."
+
+# ---------------------------------------------------------------------------
+# 3a. FORBIDDEN ALIASES — DEC-0009 D5, "three quantities, three names"
+# ---------------------------------------------------------------------------
+# Enforced by the validator (section 5a), not by convention. Each pair below
+# names two quantities that measure different things and that a tired reader
+# will be tempted to treat as one.
+forbidden_aliases:
+  - pair: [cws_weekly_users, true_wau]
+    why: "Installed-and-online (an estimate of reachability) vs. used-in-7-days (a measure of engagement). The store figure reads higher."
+  - pair: [play_active_devices_30d, true_wau]
+    why: "A 30-day window is not a 7-day window. Substituting it changes what the threshold means. Rejected by name in DEC-0009 D5."
+  - pair: [play_active_devices_30d, cws_weekly_users]
+    why: "Different platforms, different windows, different definitions of active. Neither is the other's Android/Chrome counterpart."
+  - pair: [maintenance_cost_monthly, contribution]
+    why: "One excludes founder hours and is a lower bound; the other includes a $0-shadow-rate support cost and is an upper bound. They are not comparable except inside the two clauses that explicitly compare them."
+  - pair: [maintenance_cost_monthly, maintenance_cost]
+    why: "`maintenance_cost` was revision 1's name for a DIFFERENT derivation (it included support_cost). Reusing the old name for the new quantity would silently change every reference to it. The old name is retired, not aliased."
+  - pair: [retention_d30, uninstall_rate_7d]
+    why: "The most likely proxy anyone would reach for, and the one DEC-0009 D3 forbids absolutely."
+
+# ===========================================================================
+# 4. NOISE FLOOR — why min_n is 30 and not a rounder number
+# ===========================================================================
+noise_floor:
+  observed:
+    metric: cws_weekly_users
+    product: json-workbench
+    readings:
+      - { value: 5, surface: cws_developer_dashboard, date: "2026-09-27" }
+      - { value: 3, surface: cws_public_listing,      date: "2026-09-28" }
+    disagreement_absolute: 2
+    disagreement_relative: 0.40
+    interpretation: cross_surface_disagreement
+    note: |
+      Two first-party Google surfaces reported the same nominal metric one day
+      apart and disagreed by 2 users — 40% of the base. That is a MEASURED
+      instrument error bound at this scale, not an assumed one. Source:
+      OPP-0001 open_questions.
+    not_a_time_series: |
+      IMPORTANT, and the source of a live defect elsewhere (APP-58): these two
+      readings are TWO SURFACES one day apart, not two points on one surface.
+      They are therefore NOT evidence that the figure decreased over time, and
+      nothing here may be cited as an observed decrease. No two-point series
+      on a single surface exists for any product. This note is here because
+      the 5 → 3 gap was used, in `scripts/lib/cws-export.mjs` and in revision 1
+      of the measurement-baseline narrative, as evidence that the CWS figure is
+      weekly-active rather than cumulative. That inference does not hold, and
+      only the verbatim exported column header settles the question (APP-54).
+      The noise_floor derivation below is unaffected: it reads the pair as
+      cross-surface disagreement, which is the reading APP-58 confirms is the
+      correct one.
+
+  derivation: |
+    The instrument's resolution is 1 user. To test "flat within ±10%" the band
+    (N/10) must be wider than one resolvable step, so N ≥ 10 is the arithmetic
+    floor. To survive the ±2-user cross-surface disagreement observed above,
+    N/10 ≥ 2, so N ≥ 20. 30 adds margin for week-to-week variance we have not
+    yet characterised (we have no multi-week series for any product).
+  min_n_for_trend_rules: 30
+  confidence: medium
+  revisit: "After 8 consecutive weekly exports exist for any product, replace this with the measured week-over-week standard deviation."
+
+# ===========================================================================
+# 5. RULES — §22.1 / §22.2, restated with explicit data requirements
+# ===========================================================================
+# `requires` is the contract: if ANY listed metric is missing, stale, or below
+# min_n, the rule is undecidable. It is never silently false.
+
+rules:
+
+  - id: sunset_day90_no_traction
+    outcome: SUNSET
+    source: "§22.1 bullet 1a"
+    platforms: [chrome]
+    when_all:
+      - "checkpoint >= day_90"
+      - "cws_weekly_users < 50"
+      - "retention_d30 < 0.10"
+      - "revenue_path_validated == false"
+    requires: [cws_weekly_users, retention_d30, revenue_path_validated]
+    status: UNDECIDABLE_TODAY
+    blocked_by: [retention_d30]
+    reason_codes: [metric_needs_telemetry]
+    android_behaviour:
+      outcome: insufficient_data
+      reason_code: play_wau_unavailable
+      note: "See platform_rule_sets.android. The WAU term has no Play equivalent; this rule does not run on Android and is not silently skipped either."
+
+  - id: sunset_unresolvable_risk
+    outcome: SUNSET
+    source: "§22.1 bullet 1b"
+    platforms: [chrome, android]
+    when_all:
+      - "unresolvable_policy_or_security_risk == true"
+    requires: [unresolvable_policy_or_security_risk]
+    status: PARTIALLY_DECIDABLE_TODAY
+    reason_codes: [metric_missing]
+    ruling_note: |
+      DEC-0009 D2. Revision 1 marked this DECIDABLE_TODAY and asserted the
+      metric was "currently false for all nine" — a hardcoded clear that this
+      file forbids everywhere else. It is now wired to real inputs (see
+      metrics.unresolvable_policy_or_security_risk.inputs): live Paperclip
+      incident issues, live product.yaml security_classification, and a store
+      review feed that does not exist yet. Because the metric is a
+      disjunction, the missing feed can block a CLEAR but never mask a RISK.
+      Today the honest state is `undecidable`: no product is cleared, none is
+      flagged. This is the only §22.1 clause whose inputs are even partly live.
+
+  - id: sunset_maintenance_exceeds_return
+    outcome: SUNSET
+    source: "§22.1 bullet 1c"
+    platforms: [chrome, android]
+    when_all:
+      - "contribution > 0"                            # GUARD — see spec_defects.D1
+      - "maintenance_cost_monthly > 3 * contribution"
+      - "sustained_quarters >= 2"
+    requires: [maintenance_cost_monthly, contribution, sustained_quarters]
+    status: UNDECIDABLE_TODAY
+    blocked_by: [attributable_infra_cost, sustained_quarters]
+    reason_codes: [metric_missing, insufficient_history]
+    guard_note: |
+      The `contribution > 0` line is NOT in §22.1's text. It is added here
+      because without it the clause is degenerate: with contribution = -$0.50,
+      "maintenance_cost > 3 × contribution" reads "cost > -$1.50", which is
+      true for every product with any spend at all. As written, §22.1 makes
+      every free product a SUNSET candidate on this clause alone. This guard
+      preserves the clause's evident intent ("we spend 3× what we get back").
+      It is a correction to §22.1's TEXT — see text_amendments.
+    ruling: "DEC-0009 D1 confirms the guard and splits the contribution ≤ 0 case into its own clause below, rather than leaving it unhandled."
+
+  - id: sunset_maintenance_ceiling
+    outcome: SUNSET
+    source: "DEC-0009 D1 — NEW clause, not in §22.1's text"
+    platforms: [chrome, android]
+    when_all:
+      - "contribution <= 0"
+      - "maintenance_cost_monthly > 6.00"
+      - "sustained_quarters >= 2"
+    requires: [maintenance_cost_monthly, contribution, sustained_quarters]
+    status: UNDECIDABLE_TODAY
+    blocked_by: [attributable_infra_cost, sustained_quarters]
+    reason_codes: [metric_missing, insufficient_history]
+    why_this_clause_exists: |
+      Adding the `contribution > 0` guard above closes a degenerate clause but
+      leaves a real gap behind it: a free product that costs real money and
+      returns nothing would then match NO sunset clause at all. Seven of nine
+      products are free, so that gap covers most of the portfolio. This clause
+      handles the contribution ≤ 0 case with an ABSOLUTE ceiling instead of a
+      ratio, because a ratio against a non-positive denominator has no
+      sensible reading.
+    threshold_derivation: |
+      $6.00 = 3 × $2.00.
+        $2.00 — §22's allocation rule fixes base maintenance per product at
+                "(fixed $1–2)" per month. $2.00 is the CEILING of the band the
+                plan itself states, chosen over $1.00 so the clause fires on
+                the plan's most generous reading of what maintenance should
+                cost, not its tightest.
+        3×    — the same multiplier §22.1 bullet 1c already uses for the
+                contribution > 0 case. Reusing it keeps the two clauses
+                proportionate to each other instead of introducing a second,
+                unrelated constant.
+      In words: a product with no positive contribution is a SUNSET candidate
+      when it costs more than three times what the plan budgets to keep a
+      product alive, for two sustained quarters. Both figures come from §22's
+      own text; nothing here is derived from realised spend, because no
+      realised per-product spend exists yet.
+    calibration_input: true
+    settled: false
+    calibration_note: |
+      MARKED EXPLICITLY AS A CALIBRATION INPUT, NOT A SETTLED NUMBER
+      (DEC-0009 D1, and named again in that decision's `risk` section). $6.00
+      is derived from a plan figure, not from data. It has never been checked
+      against a real per-product cost, because per-product cost attribution
+      does not exist (see attributable_infra_cost.gap). The first time this
+      number can be sanity-checked is when `attributable_infra_cost` lands and
+      one month of real attribution exists; the first time it can FIRE is
+      2027Q1 at the earliest. Re-derive it from realised spend at the
+      DEC-0009 review date (2026-11-30) or at first attribution, whichever is
+      later. Do not treat a $6.00 breach as settled evidence until then.
+    conservatism_note: |
+      Because maintenance_cost_monthly excludes founder hours it is a lower
+      bound, so this ceiling is biased toward NOT sunsetting. Given the
+      outcome is a SUNSET candidate, that is the correct direction to be wrong
+      in — and it is worth restating that §22.1 routes SUNSET to board
+      approval, so this clause flags, it never kills.
+
+  - id: scale
+    outcome: SCALE
+    source: "§22.2"
+    platforms: [chrome]
+    when_all:
+      - "retention_d30 >= 0.25"
+      - "activation >= 0.40"
+      - "wau_growth_monthly >= 0.10 for 2 consecutive months"
+      - "marketing_spend == 0"                   # §22.2's "organically"
+      - "contribution > 0 or revenue_path_validated == true"
+    requires: [retention_d30, activation, wau_growth_monthly, contribution, revenue_path_validated]
+    status: UNDECIDABLE_TODAY
+    blocked_by: [retention_d30, activation, wau_growth_monthly]
+    reason_codes: [metric_needs_telemetry, insufficient_history]
+    vanity_guard: |
+      §22.2: "installs/ratings alone never qualify". Encoded structurally —
+      neither cws_installs nor cws_rating_* appears in `requires`, so no
+      quantity of installs can produce a SCALE verdict.
+    android_behaviour:
+      outcome: insufficient_data
+      reason_code: play_wau_unavailable
+
+  - id: iterate_distribution_problem
+    outcome: ITERATE
+    source: "§22.1 bullet 3a"
+    platforms: [chrome, android]
+    when_all:
+      - "retention_d30 >= 0.20"
+      - "acquisition_weak == true"
+    requires: [retention_d30, store_listing_conversion, cws_impressions]
+    status: UNDECIDABLE_TODAY
+    blocked_by: [retention_d30]
+    reason_codes: [metric_needs_telemetry]
+    note: |
+      The acquisition half IS measurable now. The rule is still undecidable
+      because §22.1 gates it on retention.
+    ruling: |
+      DEC-0009 D2 rider 3: the retention gate is NOT loosened. Recorded as a
+      spec defect (spec_defects.D6, ITERATE unreachable) rather than routed
+      around here. Lowering a retention threshold so the policy agrees with a
+      conclusion already reached on independent evidence is the
+      instrument-bending DEC-0008 refused. The practical cost is zero: the
+      work ITERATE would authorize for json-workbench is already approved
+      under DEC-0006 on the research record, not on a §22.1 verdict.
+
+  - id: iterate_onboarding_problem
+    outcome: ITERATE
+    source: "§22.1 bullet 3b"
+    platforms: [chrome, android]
+    when_all:
+      - "activation < 0.30"
+    requires: [activation]
+    status: UNDECIDABLE_TODAY
+    blocked_by: [activation]
+    reason_codes: [metric_needs_telemetry]
+
+  - id: pause
+    outcome: PAUSE
+    source: "§22.1 bullet 2"
+    platforms: [chrome]
+    when_all:
+      - "wau_flat_60d == true"
+      - "contribution <= 0"
+      - "retention_d30 >= 0.20"
+    requires: [wau_flat_60d, contribution, retention_d30]
+    status: UNDECIDABLE_TODAY
+    blocked_by: [retention_d30, wau_flat_60d]
+    reason_codes: [metric_needs_telemetry, insufficient_history]
+    note: |
+      `contribution <= 0` is satisfied by all seven free products by
+      construction, so PAUSE reduces in practice to wau_flat AND retention.
+    android_behaviour:
+      outcome: insufficient_data
+      reason_code: play_wau_unavailable
+
+# `acquisition_weak` is the one composite this file defines rather than inherits;
+# §22.1 says "acquisition weak (distribution problem)" without a threshold.
+definitions:
+  acquisition_weak:
+    proposed: "store_listing_conversion < 0.015 OR cws_impressions declining ≥20% over 4 weeks"
+    status: PROPOSED_NOT_IN_PLAN
+    basis: "EXP-0001 records a 0.021 baseline for json-workbench; 0.015 is ~70% of that."
+    confidence: low
+    note: "§22.1 states no number. This is a placeholder for CEO to set or reject; the script must refuse to use a PROPOSED_NOT_IN_PLAN definition until its status is `approved`."
+    not_ruled_on: |
+      DEC-0009 did not rule on this threshold — it was not one of the five
+      questions put to the CEO. It remains PROPOSED_NOT_IN_PLAN and the
+      evaluator must still refuse to use it. Flagged here so its absence from
+      DEC-0009 is not read as approval by silence.
+
+# ===========================================================================
+# 5a. STRUCTURAL INVARIANTS — checked at config load, not at review time
+# ===========================================================================
+# DEC-0009 D2 rider 1 requires that "no store-only rule may ever produce
+# SUNSET or SCALE" be encoded STRUCTURALLY rather than as a comment. These
+# are assertions over this file's own contents. The evaluator (APP-43) MUST
+# evaluate them when it loads this config and MUST fail closed — refuse to
+# produce any verdict at all — if one fails. A warning is not compliance:
+# the whole point is that a future edit adding a store-only kill rule cannot
+# ship, not that it ships with a note attached.
+validator:
+  fail_closed: true
+  on_failure: "Emit the failing invariant id and exit non-zero. Produce no per-product outcome and no allocation."
+  invariants:
+
+    - id: no_store_only_sunset_or_scale
+      statement: |
+        For every rule R with outcome in [SUNSET, SCALE]: the set of metric
+        ids in R.requires MUST NOT be a subset of the metrics whose
+        `origin` is `store`. Equivalently, every SUNSET or SCALE rule must
+        require at least one metric of origin `first_party_records`,
+        `telemetry`, or `evaluation_history`.
+      ruling: "DEC-0009 D2 rider 1."
+      rationale: |
+        Store data recovers the WAU and acquisition halves of §22.1 and
+        nothing else. A rule built only from store metrics can describe
+        reach; it cannot describe use, retention, or economics. Allowing such
+        a rule to kill a product (SUNSET) or to escalate spend (SCALE) would
+        convert the one thing store data is good at into a verdict it cannot
+        support — which is the exact failure mode §22.2's vanity guard names
+        and the reason DEC-0009 refused "weaker store-only interim rules".
+      holds_at_revision_2: true
+      checked_by_hand: |
+        sunset_day90_no_traction requires retention_d30 (telemetry) and
+        revenue_path_validated (first_party) — passes.
+        sunset_unresolvable_risk requires unresolvable_policy_or_security_risk
+        (first_party) — passes.
+        Both maintenance clauses require first_party + evaluation_history —
+        pass. scale requires retention_d30 and activation (telemetry) —
+        passes. No rule in this file is store-only.
+      what_it_would_catch: |
+        A future edit such as "SUNSET if cws_weekly_users < 10 at day 90" —
+        which reads reasonable, requires no telemetry, and would be wrong.
+
+    - id: no_forbidden_alias_in_any_rule
+      statement: "No rule, definition, or allocation term may use one member of a `forbidden_aliases` pair in a position documented as belonging to the other. The validator checks that both members of each pair are never resolved from the same source field in the ingest manifest."
+      ruling: "DEC-0009 D5."
+
+    - id: every_metric_declares_origin
+      statement: "Every entry under `metrics` MUST carry an `origin`. A metric without one cannot be checked against no_store_only_sunset_or_scale, so its absence is a load failure rather than a default."
+
+    - id: retention_d30_never_proxied
+      statement: "No entry anywhere in this file may declare a proxy, substitute, fallback, estimate or default for `retention_d30`. `allocation.proxies` must not contain it, and `metrics.retention_d30.never_proxy` must remain true."
+      ruling: "DEC-0009 D3."
+
+    - id: every_non_verdict_carries_a_reason_code
+      statement: "Every `insufficient_data` and `not_applicable` outcome the evaluator emits MUST carry ≥1 reason code drawn from `reason_codes`. An unregistered or absent reason code is a failure, not a blank."
+      ruling: "DEC-0009 D5 — 'a named reason, never a silent fall-through'."
+
+    - id: no_default_outcome
+      statement: "`default_outcome` MUST be null and `resolution.no_fallthrough` MUST be true."
+
+# ===========================================================================
+# 6. RESOLUTION
+# ===========================================================================
+resolution:
+  no_fallthrough: true
+  order:
+    - "If store_item_status != published → not_applicable, reason_code not_published. Stop."
+    - "If first_published is null → not_applicable, reason_code first_published_null. Stop."
+    - "Select the rule set for this product's platform (see platform_rule_sets)."
+    - "Evaluate every rule in that set. Classify each as FIRED, NOT_FIRED, or UNDECIDABLE, and attach reason codes to every UNDECIDABLE."
+    - "If any FIRED → return the highest-precedence fired outcome."
+    - "Else if any UNDECIDABLE → return insufficient_data with the full blocking list and every reason code."
+    - "Else → return CONTINUE."
+  insufficient_data_report_must_include:
+    - rule_id
+    - reason_codes             # from the registry in section 2a; never free text
+    - missing_metrics          # absent entirely
+    - stale_metrics            # present, past max_age_days, with as_of
+    - below_min_n_metrics      # present and fresh, but n too small, with actual n
+    - measurability_class      # so the reader knows if this is fixable by ingest, by telemetry, or not at all
+    - fixable_by               # one of [store_ingest, telemetry, scale, build, nothing] — the actionable form of the above
+  forbidden:
+    - "Substituting 0 for a missing metric."
+    - "Substituting cws_weekly_users for true_wau, retention, or activation."
+    - "Substituting play_active_devices_30d for true_wau or for cws_weekly_users (DEC-0009 D5)."
+    - "Proxying retention_d30 with anything whatsoever (DEC-0009 D3)."
+    - "Treating an undecidable rule as not-fired."
+    - "Returning any outcome when first_published is null."
+    - "Emitting a recommendation without the data-sufficiency block attached."
+    - "Emitting insufficient_data without the output_contract notice below."
+    - "Paraphrasing, summarising or omitting the output_contract notice."
+
+# ===========================================================================
+# 6a. OUTPUT CONTRACT — DEC-0009 D2 rider 2
+# ===========================================================================
+# The evaluator must print this in its OWN output. The text is normative and
+# byte-for-byte: it is quoted here so that the implementing issue (APP-43)
+# cannot paraphrase it away. Reproducing the meaning is not compliance;
+# reproducing the string is.
+output_contract:
+  insufficient_data_notice:
+    must_print_verbatim: true
+    print_when:
+      - "once per evaluator run, in the run header"
+      - "attached to every product whose outcome is insufficient_data"
+    text: "`insufficient_data` is not a freeze: §22.1 exists to stop work (PAUSE, SUNSET) or to escalate spend (SCALE), so it does not authorize ordinary work and its silence does not prohibit it — a product returning `insufficient_data` continues under CPO and CEO direction at its base maintenance allocation."
+    why_verbatim: |
+      DEC-0009 D2 records that the company has already made this mistake once
+      in the opposite direction: agents read §10.4's sub-threshold
+      prioritization score as a prohibition on operating a live product, and
+      DEC-0006 and DEC-0008 had to unwind it. A blank field invites the same
+      re-derivation. The line is printed by the script, in the script's own
+      output, so the error cannot be re-derived from silence — and it is
+      pinned verbatim so a later summariser cannot soften it into "no
+      recommendation at this time".
+    integrity_check: "The evaluator should assert this string against the config at startup rather than embedding its own copy. If the two differ, that is a validator failure."
+
+  allocation_withheld_notice:
+    must_print_verbatim: true
+    print_when:
+      - "whenever allocation.coverage falls below allocation.coverage.floor"
+    text: "allocation_withheld: coverage=<X> — realised §22 weight is below the 0.7 floor, so the growth pool is not allocated this cycle and every product receives base maintenance only. This is the specified behaviour of DEC-0009 D3, not a failure of the allocation script."
+    placeholder: "<X> is the computed coverage fraction to two decimal places."
+
+# ===========================================================================
+# 6b. PLATFORM RULE SETS — DEC-0009 D5
+# ===========================================================================
+# `substitute` was REJECTED. Android gets its own rule set rather than
+# borrowing Chrome's thresholds through an aliased metric.
+platform_rule_sets:
+
+  chrome:
+    status: ACTIVE
+    rules: [sunset_day90_no_traction, sunset_unresolvable_risk, sunset_maintenance_exceeds_return, sunset_maintenance_ceiling, scale, iterate_distribution_problem, iterate_onboarding_problem, pause]
+
+  android:
+    status: THRESHOLDS_NOT_SET
+    blocked_by_issue: APP-42
+    follow_up_issue: APP-68
+    unblock_condition: "APP-42's first real Play export confirms the report schema — specifically, which active-device aggregations Play actually publishes and under what column names."
+    rules_inherited_unchanged: [sunset_unresolvable_risk, sunset_maintenance_exceeds_return, sunset_maintenance_ceiling, iterate_onboarding_problem]
+    wau_written_rules:
+      affected: [sunset_day90_no_traction, scale, pause]
+      outcome: insufficient_data
+      reason_code: play_wau_unavailable
+      not_a_fall_through: |
+        These rules do not silently skip, do not evaluate as not-fired, and do
+        not borrow a Chrome threshold. They return `insufficient_data` with
+        the named reason `play_wau_unavailable`, which appears in the
+        per-product report exactly like any other named gap.
+    substitution_rejected: |
+      DEC-0009 D5 rejected substituting `play_active_devices_30d` into any
+      WAU threshold. A 30-day active-device count and a 7-day distinct-active
+      user count are different quantities; swapping them changes what the
+      threshold means while leaving its number unchanged, which is the same
+      class of error as aliasing CWS "weekly users" to §18b's WAU. Three
+      quantities, three names — see forbidden_aliases.
+    thresholds_are_a_follow_up: |
+      Android-specific thresholds (what an acceptable 30-day active-device
+      figure IS for an Android product at day 90, stated as its own number
+      rather than borrowed from §22.1's WAU < 50) are deliberately NOT set
+      here. Analyst's reading of Play's report schema is MEDIUM confidence
+      and unverified against a real export; setting a threshold on an unread
+      schema is how a wrong number becomes folklore. Tracked as config
+      follow-up issue APP-68, blocked on APP-42.
+    costs_nothing_today: |
+      TelePort is on an internal track only and InvTrack's first_published is
+      null, so both are `not_applicable` regardless of any Android threshold.
+      No verdict is being withheld that could otherwise be produced.
+
+# ===========================================================================
+# 7. ALLOCATION — §22's monthly attention budget, DEC-0009 D3
+# ===========================================================================
+# Revision 1 had no allocation section at all; D3 existed only as a recorded
+# defect. This encodes the ruling: renormalise over realised terms, stamp
+# coverage everywhere, withhold the growth pool below a floor, cap the
+# judgement term, and admit exactly one declared proxy.
+allocation:
+  source: "§22 allocation rule"
+  cadence: monthly
+  path: "deterministic draft → CEO → board"
+
+  base_maintenance_usd_per_product_month: { min: 1.00, max: 2.00 }
+  base_maintenance_note: "§22: 'base maintenance (fixed $1–2)'. Paid regardless of coverage, regardless of outcome, and regardless of whether the growth pool is allocated at all."
+
+  # §22: score = 0.4·norm(contribution_trend) + 0.2·norm(WAU growth)
+  #            + 0.2·norm(D30 retention) + 0.1·strategic
+  #            + 0.1·(−maintenance_burden)
+  weights:
+    contribution_trend: 0.4
+    wau_growth:         0.2
+    retention_d30:      0.2
+    strategic:          0.1
+    maintenance_burden: 0.1     # enters NEGATIVELY: −norm(maintenance_burden)
+  weights_sum: 1.0
+
+  per_product_cap:
+    max_share_of_growth_pool: 0.5
+    until: "contribution > 0"
+    source: "§22: 'capped so no product > 50% of pool until contribution > $0'"
+
+  renormalise:
+    enabled: true
+    method: "score = Σ(w_i · norm(term_i)) over REALISED terms only, divided by Σ(w_i) over realised terms."
+    why: |
+      D3's defect was that a script defaulting unavailable terms to 0 silently
+      reweights the whole allocation. Renormalising makes the reweighting
+      explicit and forces `coverage` to be computed and reported, which is
+      what makes the reweighting visible rather than silent.
+
+  coverage:
+    definition: "Σ of §22 weights for terms actually realised for this product, divided by 1.0 (the full §22 weight). A term counts as realised only if its metric is present, fresh, and above min_n."
+    stamp_on:
+      - "every per-product score"
+      - "the allocation as a whole (the minimum coverage across scored products, reported alongside the per-product figures)"
+    stamp_is_mandatory: true
+    stamp_note: "A score reported without its coverage is a bare number claiming more authority than it has. DEC-0009 D3 requires the stamp on both surfaces; the validator treats an unstamped score as a failure."
+    floor: 0.7
+    below_floor_behaviour:
+      allocate: base_maintenance_only
+      growth_pool: withheld_entirely
+      emit: "allocation_withheld: coverage=<X>"
+      emit_contract: "See output_contract.allocation_withheld_notice — the line is printed verbatim."
+      partial_allocation: forbidden
+      partial_allocation_note: "The growth pool is withheld ENTIRELY, not scaled down in proportion to coverage. A proportionally-scaled pool would still be allocated on the same degenerate arithmetic, just less of it."
+    floor_rationale: |
+      Below 0.7 the surviving terms are contribution_trend — degenerate today,
+      since all seven free products sit at roughly equal negative contribution
+      — and `strategic`, which is a judgement input. An allocation driven by a
+      judgement term and a degenerate one, stamped with a computed score, is
+      the vanity-metric failure §22.2 forbids and SOUL.md names as a CEO
+      failure. Allocating nothing from the growth pool is better than
+      allocating on arithmetic theatre.
+
+  caps:
+    strategic:
+      max_share_of_realised_weight: 0.25
+      on_breach:
+        allocate: base_maintenance_only
+        growth_pool: withheld_entirely
+        emit: "allocation_withheld: strategic_share=<X> — the judgement term exceeds 0.25 of realised weight, so coverage is too low to allocate."
+      rationale: |
+        `strategic` is the one term in §22's score that is not measured. If it
+        dominates what survives renormalisation, the "deterministic draft" is
+        a judgement call wearing a number's clothes. DEC-0009 D3: if strategic
+        would exceed 0.25 of realised weight, coverage is too low to allocate.
+      currently_subsumed_by: coverage.floor
+      subsumption_derivation: |
+        STATED SO IT IS NOT MISTAKEN FOR A LIVE GUARD. `strategic`'s weight is
+        fixed at 0.1, so its renormalised share is 0.1 / coverage. That
+        exceeds 0.25 only when coverage < 0.4. The coverage floor already
+        withholds the pool below 0.7, so under §22's CURRENT weights this cap
+        can never be the binding constraint — at coverage 0.7 the strategic
+        share is 0.143. The cap is retained anyway because it is load-bearing
+        under either of two foreseeable changes, and would otherwise have to
+        be rediscovered: (a) §22's strategic weight rising above 0.175
+        (= 0.25 × 0.7), or (b) the coverage floor being lowered below 0.4.
+        Encoding a cap and quietly knowing it cannot fire would be the same
+        offence as encoding a metric and quietly defaulting it.
+      confidence: high      # this is arithmetic, not judgement
+
+  proxies:
+    # Exactly one proxy is admitted, and it is admitted BY NAME with its
+    # limitation on its face. Anything not listed here may not be proxied.
+    maintenance_burden:
+      proxy: true
+      proxies_for: "§22's `maintenance_burden` term"
+      measured_as: "attributable AI spend + attributable infra spend, per product, per month (= metrics.maintenance_cost_monthly)"
+      excludes: founder_hours
+      counts_toward_coverage: true
+      weight_recovered: 0.1
+      ruling: "DEC-0009 D3 — 'maintenance_burden counts toward coverage as a declared proxy'."
+      declared_note: |
+        DECLARED means two things, both required. First, this term's
+        contribution to coverage is real: the 0.1 weight is recovered, not
+        assumed. Second, the number is NOT the quantity §22 named — §22's
+        maintenance burden would include founder time, and this does not. It
+        is a lower bound, so a product's maintenance burden is UNDER-stated,
+        so its score is flattered. Every report that uses this term must carry
+        `proxy: true` and `excludes: founder_hours` alongside the figure, not
+        in a footnote.
+      availability_today: false
+      availability_note: "The AI-spend half is live; the infra half is not (see attributable_infra_cost.gap). Until both exist this term is UNREALISED and does not count toward coverage — a declared proxy still has to have a value."
+
+  never_proxy:
+    - metric: retention_d30
+      weight_forfeited: 0.2
+      ruling: "DEC-0009 D3 — 'Never proxy D30 retention with anything.'"
+      note: |
+        This weight stays permanently unrealised until telemetry ships AND n
+        is large enough for a cohort to exist. It is the single largest
+        contributor to today's coverage shortfall, and it is not recoverable
+        by any amount of store ingest. Naming it here, with its weight, is
+        what keeps the shortfall legible instead of mysterious.
+
+  expected_coverage_today:
+    value: 0.6
+    derivation: |
+      Realised:   contribution_trend 0.4 (attributable AI cost is live and
+                  net_revenue is knowable)
+                + strategic          0.1 (a judgement input; always available)
+                + maintenance_burden 0.1 (declared proxy, per D3)
+                = 0.6
+      Unrealised: wau_growth         0.2 — wau_growth_monthly needs
+                  min_history_weeks 12 and min_n 30; we have 0 weeks of export
+                  history for any product and n = 3–5 where we have any reading
+                  at all.
+                  retention_d30      0.2 — needs telemetry that does not exist,
+                  may never be proxied, and would not exist at n = 3–5 even if
+                  telemetry shipped tomorrow.
+    caveat: |
+      0.6 is the CEILING on today's coverage, and today's actual figure is
+      lower: maintenance_burden's infra half is not built, so that 0.1 is not
+      really realised yet either, putting the true current figure at 0.5.
+      Both are below the 0.7 floor, so the allocation outcome is identical
+      and nothing turns on the difference — but the two numbers are reported
+      separately rather than rounded together.
+    consequence: |
+      READ THIS BEFORE FILING A BUG. Coverage is below the 0.7 floor, so the
+      first several monthly allocations will withhold the growth pool
+      entirely and run on base maintenance only. That is the SPECIFIED
+      behaviour of DEC-0009 D3, working correctly — not a misconfiguration,
+      not a failed ingest, and not a reason to lower the floor. The floor
+      stops being binding when store exports give wau_growth 12 weeks of
+      history at n ≥ 30, which recovers 0.2 and brings coverage to 0.8. Until
+      then, base maintenance only, with the reason printed every cycle.
+    confidence: high      # arithmetic over §22's stated weights
+
+# ===========================================================================
+# 8. TEXT AMENDMENTS PENDING — the places config and plan disagree
+# ===========================================================================
+# DEC-0009 is operative in config today because SUNSET is a CANDIDATE flag
+# that §22.1 itself routes to board approval before any product is sunset —
+# so no irreversible action follows from these while they await ratification.
+# They are recorded ON the clause rather than smoothed over, which is what
+# keeps the disagreement visible if the founder declines.
+text_amendments:
+  - id: TA-1
+    amends: "§22.1 bullet 1c"
+    change: "Add a `contribution > 0` precondition to the maintenance/contribution ratio clause."
+    reason: "Without it the clause is vacuously true for every product with non-positive contribution, i.e. seven of nine."
+    ruled_by: DEC-0009
+    ratification_status: PENDING_FOUNDER
+    tracked_on: APP-55
+    operative_in_config_meanwhile: true
+
+  - id: TA-2
+    amends: "§22.1 bullet 1c"
+    change: "Add the second clause `sunset_maintenance_ceiling` for the contribution ≤ 0 case, at an absolute $6.00/product/month ceiling sustained 2 quarters."
+    reason: "TA-1 closes a degenerate clause and would otherwise leave free products matching no sunset clause at all."
+    ruled_by: DEC-0009
+    ratification_status: PENDING_FOUNDER
+    tracked_on: APP-55
+    operative_in_config_meanwhile: true
+
+  - id: TA-3
+    amends: "appforge-brain/strategy/2026-q4-goals.md goal O2"
+    change: "Restate 'JSON Workbench: WAU +30% by 2026-12-31' as an absolute floor on a trailing mean."
+    ruled_by: DEC-0009
+    ratification_status: PENDING_FOUNDER
+    tracked_on: APP-55
+    operative_in_config_meanwhile: false
+    not_operative_note: "strategy/ is founder-approval content. This file RECORDS the restatement (see baselines.json_workbench_wau.restatement_pending) and does not apply it."
+
+# ===========================================================================
+# 9. DEFECTS FOUND IN §22.1/§22.2 WHILE ENCODING THEM
+# ===========================================================================
+# Recorded here because the script cannot be correct while they stand.
+# D1–D5 were ruled on by DEC-0009 on 2026-09-28. D6 is recorded and
+# deliberately NOT fixed.
+spec_defects:
+  D1:
+    where: "§22.1 bullet 1c"
+    defect: "`maintenance cost > 3× contribution` is vacuously true whenever contribution ≤ 0, i.e. for every free product. As written it makes all seven free products SUNSET candidates."
+    severity: high
+    confidence: high
+    status: RULED
+    ruling: "DEC-0009 D1 — both: a `contribution > 0` guard AND a separate absolute $6.00/month ceiling for the contribution ≤ 0 case."
+    encoded_in: [rules.sunset_maintenance_exceeds_return, rules.sunset_maintenance_ceiling, metrics.maintenance_cost_monthly]
+    text_amendments: [TA-1, TA-2]
+    changes_any_outcome_today: false
+    changes_any_outcome_today_why: "Both clauses require sustained_quarters ≥ 2 and no evaluation history exists; earliest possible fire is 2027Q1."
+
+  D2:
+    where: "§22.1 and §22.2 throughout"
+    defect: "Every outcome except `sunset_unresolvable_risk` requires retention or activation. Both need telemetry that does not exist and that the CEO has ruled out shipping as a first move. The policy is therefore inert: no product can be SCALEd, ITERATEd, PAUSEd, or SUNSET on traction grounds."
+    severity: high
+    confidence: high
+    status: RULED
+    ruling: "DEC-0009 D2 — accept `insufficient_data` as the honest per-product output. Weaker store-only interim rules were REJECTED. Three riders attached."
+    riders_encoded_in:
+      - "validator.invariants.no_store_only_sunset_or_scale (rider 1, structural)"
+      - "output_contract.insufficient_data_notice (rider 2, verbatim)"
+      - "spec_defects.D6 + rules.iterate_distribution_problem.ruling (rider 3, gate not loosened)"
+      - "metrics.unresolvable_policy_or_security_risk.inputs (rider 4, real inputs not a hardcoded false)"
+    changes_any_outcome_today: false
+
+  D3:
+    where: "§22 allocation rule"
+    defect: "score = 0.4·norm(contribution_trend) + 0.2·norm(WAU growth) + 0.2·norm(D30 retention) + 0.1·strategic + 0.1·(−maintenance_burden). D30 retention (20% of weight) and maintenance_burden (10%) are unavailable. A script that defaults them to 0 silently reweights the whole allocation."
+    severity: medium
+    confidence: high
+    status: RULED
+    ruling: "DEC-0009 D3 — renormalise over realised terms, stamp coverage on every score and on the allocation, withhold the growth pool entirely below coverage 0.7, cap `strategic` at 0.25 of realised weight, admit maintenance_burden as a declared proxy, never proxy D30 retention."
+    encoded_in: [allocation]
+    changes_any_outcome_today: true
+    changes_any_outcome_today_why: "This is the one ruling with a live effect: it specifies that the first several allocations run base-maintenance-only rather than allocating a growth pool on 0.6 coverage. Revision 1 specified no allocation behaviour at all, so nothing is being retracted."
+
+  D4:
+    where: "§22.1 'Evaluated at day 30/60/90 post-launch'"
+    defect: "No product.yaml records a launch date. The day-N clock has no origin."
+    severity: high
+    confidence: high
+    status: BACKFILL_IN_PROGRESS
+    ruling: "Not a judgement call and needed no DEC-0009 ruling — it is a backfill, tracked on APP-41. The honest entry until then is null for all nine."
+    correction_applied_in_revision_2: |
+      Revision 1 recorded json-workbench `first_published: "2026-09-20"`,
+      sourced from logs/chrome-store/2026-09-20-release.log. CTO checked that
+      log and it contains NO publish event (it ends
+      `[ERROR] [BLOCKED] Found 3 secret findings`), and the first tag v0.1.0
+      is dated 2026-09-23, so no publish was possible on 2026-09-20. The value
+      is corrected to null here, matching what
+      json-workbench/.appforge/product.yaml now carries. The date was wrong,
+      it is recorded as having been wrong, and it is not quietly overwritten.
+      Consequence: json-workbench's expected outcome moves from
+      `insufficient_data` to `not_applicable` (reason_code
+      first_published_null), so 0 of 9 products reach an evaluable state
+      today. That is a correction, not a regression.
+
+  D5:
+    where: "§22.1/§22.2 'WAU'"
+    defect: "Play Console reports no 7-day distinct-active figure, so 'WAU' has no store-side equivalent on Android. InvTrack and TelePort cannot be evaluated on any WAU clause even with a perfect ingest."
+    severity: medium
+    confidence: medium
+    status: RULED
+    ruling: "DEC-0009 D5 — substitution REJECTED. Android gets its own rule set; WAU-written rules return `insufficient_data` with reason `play_wau_unavailable`. Android thresholds are a config follow-up blocked on APP-42's first real export."
+    encoded_in: [platform_rule_sets.android, reason_codes.play_wau_unavailable, forbidden_aliases]
+    changes_any_outcome_today: false
+    changes_any_outcome_today_why: "TelePort is internal-track only and InvTrack's first_published is null; both are not_applicable regardless."
+
+  D6:
+    where: "§22.1 bullet 3a"
+    defect: "ITERATE is unreachable. Its `retention ≥ 20%` gate requires telemetry that does not exist, while the acquisition half of the same rule is measurable today. The policy therefore cannot reach the distribution diagnosis that OPP-0001 already supports on independent evidence for json-workbench."
+    severity: medium
+    confidence: high
+    status: RECORDED_NOT_FIXED
+    ruling: |
+      DEC-0009 D2 rider 3 — the gate is NOT loosened, and this is recorded as
+      a standing spec defect rather than routed around in config. Lowering a
+      retention threshold so the policy agrees with a conclusion reached
+      another way is the instrument-bending DEC-0008 refused ("a rubric is
+      changed when it misranks reality, not when it returns an unwelcome
+      number"). The practical cost is zero: DEC-0006 already approved the
+      json-workbench listing rewrite on the research record, not on a §22.1
+      verdict.
+    deliberately_unfixed: true
+    revisit: "2026-11-30 with DEC-0009, or sooner if a product reaches n where retention is measurable and ITERATE is still unreachable."
+
+# ===========================================================================
+# 10. PER-PRODUCT STATE AT 2026-09-28
+# ===========================================================================
+# Informational. The script derives this from product.yaml + the ingest;
+# it is written out here so the first run can be checked against it.
+#
+# `first_published` is null for ALL NINE products (see spec_defects.D4).
+# Under resolution.order that makes every product `not_applicable` today:
+# 0 of 9 evaluable, 9 of 9 carrying a named reason. The second number is the
+# whole gain from this work; the first is why it must not be described as
+# restoring the kill policy.
+products:
+  json-workbench:   { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown; the 2026-09-20 date carried in revision 1 was unsupported — see spec_defects.D4" }
+  echokit:          { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown" }
+  stellartab:       { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown" }
+  session-transfer: { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown" }
+  telugupanchangam: { platform: chrome,  store_item_status: unpublished,    first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "awaiting free CWS slot (§13.6)" }
+  gitaverses:       { platform: chrome,  store_item_status: unpublished,    first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "awaiting free CWS slot (§13.6)" }
+  cors-enabler:     { platform: chrome,  store_item_status: draft,          first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "CWS item still draft" }
+  teleport:         { platform: android, store_item_status: internal_track, first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "Play internal track only; CWS target is an unpublished draft" }
+  invtrack:         { platform: android, store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown; would also hit play_wau_unavailable on every WAU-written rule — see platform_rule_sets.android" }
+
+portfolio_note: |
+  Four of nine products are published with an unknown launch date and four
+  are not publicly launched at all, three of those behind the §13.6 two-slot
+  constraint. Measurement is not this portfolio's binding constraint; slots
+  are. That is a live board approval (APP-37) and is not re-litigated here.
+
+# ===========================================================================
+# 11. Q4 GOAL BASELINE (O2)
+# ===========================================================================
+baselines:
+  json_workbench_wau:
+    goal_ref: "appforge-brain/strategy/2026-q4-goals.md — 'JSON Workbench: WAU +30% by 2026-12-31'"
+    metric: cws_weekly_users
+    observations:
+      - { value: 5, surface: cws_developer_dashboard, date: "2026-09-27" }
+      - { value: 3, surface: cws_public_listing,      date: "2026-09-28" }
+    observations_retained_unreconciled: |
+      DEC-0009 O2: both surfaces and both dates are RETAINED, unreconciled,
+      by default. Per §6.2 a bad number gets flagged and explained, never
+      quietly corrected, and there is no basis to prefer one surface over the
+      other — the CWS CSV export's own column header is what settles it
+      (APP-54). Do not collapse these two rows into one number.
+    baseline_value: null
+    provisional_band: [3, 5]
+    certified: false
+    why_not_certified: |
+      Two surfaces, two values, one day apart, no export in hand. A baseline
+      needs ≥4 weekly observations from one surface; the product is 8 days old.
+    goal_is_scoreable: false
+    finding: |
+      +30% on a base of 3–5 is a target of 4–7 users. The smallest change the
+      instrument can express is 1 user (20–33%) and the observed disagreement
+      between two Google surfaces is 2 users (40%). THE TARGET EFFECT IS
+      SMALLER THAN THE INSTRUMENT'S DEMONSTRATED ERROR. O2 is unscoreable as
+      written, and shipping telemetry would not fix it — the problem is n, not
+      instrumentation. It becomes scoreable at roughly n ≥ 30.
+    confidence: high      # on the arithmetic
+    restatement_pending:
+      proposed_goal: "json-workbench cws_weekly_users >= 50 on the 2026-12-29 export, 4-week trailing mean"
+      threshold: 50
+      threshold_basis: |
+        CEO amended Analyst's proposed 40 to 50 to match §22.1's own day-90
+        WAU floor. Using the policy's existing number rather than a fresh one
+        means the goal and the kill clause cannot disagree about what "enough
+        users" means.
+      as_of_date: "2026-12-29"
+      aggregation: "4-week trailing mean, single surface"
+      why_absolute_not_percentage: "Absolute targets are scoreable at any n; percentage targets on a base of 3 are not. Consistent with OPP-0001's pre-registered falsifier (a)."
+      ratification_status: PENDING_FOUNDER
+      tracked_on: APP-55
+      applied_here: false
+      applied_here_note: |
+        RECORDED, NOT APPLIED. `strategy/` is founder-approval content;
+        Analyst records the defect and the restatement and does not edit the
+        goal. `goal_ref` above still points at the goal as currently written,
+        and `goal_is_scoreable` stays false until APP-55 resolves. If the
+        founder declines, this block stays here as the record of a goal known
+        to be unscoreable — which is the point of recording it.
