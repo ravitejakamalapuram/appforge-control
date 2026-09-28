@@ -556,32 +556,51 @@ noise_floor:
       - { value: 3, surface: cws_public_listing,      date: "2026-09-28" }
     disagreement_absolute: 2
     disagreement_relative: 0.40
-    interpretation: cross_surface_disagreement
+    interpretation: spread_origin_unestablished   # not cross_surface; see below
     note: |
-      Two first-party Google surfaces reported the same nominal metric one day
-      apart and disagreed by 2 users — 40% of the base. That is a MEASURED
-      instrument error bound at this scale, not an assumed one. Source:
+      Two first-party Google surfaces reported figures under the same nominal
+      name one day apart and disagreed by 2 users — 40% of the base. The
+      DISAGREEMENT is measured, not assumed, and that is what the derivation
+      consumes. Its ORIGIN is not established: calling it instrument error
+      presupposes the two figures are the same quantity, which is exactly the
+      open question (see `carries_no_weekly_vs_cumulative_signal`). Source:
       OPP-0001 open_questions.
-    not_a_time_series: |
-      IMPORTANT, and the source of a live defect elsewhere (APP-58): these two
-      readings are TWO SURFACES one day apart, not two points on one surface.
-      They are therefore NOT evidence that the figure decreased over time, and
-      nothing here may be cited as an observed decrease. No two-point series
-      on a single surface exists for any product. This note is here because
-      the 5 → 3 gap was used, in `scripts/lib/cws-export.mjs` and in revision 1
-      of the measurement-baseline narrative, as evidence that the CWS figure is
-      weekly-active rather than cumulative. That inference does not hold, and
-      only the verbatim exported column header settles the question (APP-54).
-      The noise_floor derivation below is unaffected: it reads the pair as
-      cross-surface disagreement, which is the reading APP-58 confirms is the
-      correct one.
+    carries_no_weekly_vs_cumulative_signal: |
+      IMPORTANT — APP-58 ruling, 2026-09-28. The 5 → 3 gap was cited, in
+      `scripts/lib/cws-export.mjs` and in revision 1 of the
+      measurement-baseline narrative, as evidence that the CWS figure is
+      weekly-active rather than cumulative ("a cumulative counter cannot
+      decrease"). That inference is CIRCULAR and may not be reinstated
+      anywhere:
+
+        - The 5 is a developer-dashboard reading, the 3 a public-listing
+          reading. Nobody observed WHICH dashboard page the 5 came from.
+        - If it came off the Weekly Users page, the question is already
+          answered by the page name and the decrease adds nothing.
+        - If it came off the Installs page, the two figures are different
+          quantities and the "decrease" is an artefact of comparing them.
+
+      Either branch leaves the gap carrying no weight on the
+      weekly-vs-cumulative question. Only the verbatim exported column header
+      settles it (APP-54).
+
+      Deliberately NOT asserted here: that the two readings are different
+      quantities. Analyst's APP-47 analysis argues the listing's "N users" is
+      the same Weekly Users figure surfaced publicly, and that may well be
+      right; it is simply not established, because the same unobserved-page
+      gap cuts both ways. This field records only what both branches agree on.
+
+      The derivation below is unaffected either way: it consumes the pair as a
+      ±2-user disagreement bound at n≈3–5, which holds whether the spread is
+      cross-surface or day-to-day. No two-point series on a single, identified
+      surface exists for any product, so no trend claim rests on this pair.
 
   derivation: |
     The instrument's resolution is 1 user. To test "flat within ±10%" the band
     (N/10) must be wider than one resolvable step, so N ≥ 10 is the arithmetic
-    floor. To survive the ±2-user cross-surface disagreement observed above,
-    N/10 ≥ 2, so N ≥ 20. 30 adds margin for week-to-week variance we have not
-    yet characterised (we have no multi-week series for any product).
+    floor. To survive the ±2-user disagreement observed above — whatever its
+    origin — N/10 ≥ 2, so N ≥ 20. 30 adds margin for week-to-week variance we
+    have not yet characterised (we have no multi-week series for any product).
   min_n_for_trend_rules: 30
   confidence: medium
   revisit: "After 8 consecutive weekly exports exist for any product, replace this with the measured week-over-week standard deviation."
