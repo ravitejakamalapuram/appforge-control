@@ -1,0 +1,12 @@
+{
+  "name": "appforge-control-scripts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "yaml": "^2.5.0"
+  }
+}
