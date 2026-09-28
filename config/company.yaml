@@ -25,6 +25,9 @@ company:
   autonomy_default: L2   # §24.2: "builds/tests, human releases" — "Start L2 for factory work, L1 for anything outside it"
 
   # Placeholder — the ntfy.sh topic is a separate, not-yet-set-up integration
+  # (still null as of 2026-09-28). Because this is null, security.yaml's §16.2
+  # notify policy has been corrected to name the board approval queue instead of
+  # a push alert — see the CONTAINMENT / notify_founder block there (APP-78).
   # (§28 lists ntfy.sh as a planned $0 dependency, but nothing has provisioned
   # an actual unguessable topic yet). Do not fill in a guessed topic name.
   # Master-plan example shape: founder_notify: ntfy://appforge-founder-<random>

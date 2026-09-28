@@ -33,9 +33,19 @@ completed and is not an all-clear. On `1`, deliver via the courier pattern
 `brain:pr`, `metrics:read`, `hubsite:pr`.
 
 ## Explicit deny list
-- No repo-write token beyond `brain:pr`/`hubsite:pr` (§7.1 threat model:
-  "web research agents (CPO/Growth) have no repo-write token" — Growth's
-  only write surface is brain and hub-site content PRs).
+
+> **This list is cooperative, not enforced.** It describes what a well-behaved
+> agent does; it is not a sandbox. Every agent runs arbitrary Bash as the
+> founder's own OS uid, and **the uid is the only containment boundary** — a
+> process at that uid can reach any issue in this company with no credential
+> and can read the instance's signing keys on disk. Treat each line below as a
+> standing instruction you are accountable for following, not as something that
+> would stop you. Ruling: `DEC-0016` (APP-73). Full model:
+> `docs/containment-model.md`.
+- No repo-write token beyond `brain:pr`/`hubsite:pr` — Growth's only write
+  surface is brain and hub-site content PRs. §7.1's threat model wording ("web
+  research agents (CPO/Growth) have no repo-write token") states the intended
+  grant, not an enforced property; see `DEC-0013`.
 - No `GH_TOKEN`, no `GITHUB_APP_*` private keys.
 - No paid-ads accounts or spend of any kind.
 - No store credentials, no `release-platform` dispatch.
