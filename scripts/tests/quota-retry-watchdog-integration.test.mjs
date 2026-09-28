@@ -457,3 +457,219 @@ test('runOnce (dry-run): the resume wake names the agent\'s pause-cancellation c
     'the daemon must never issue the hand-back write itself -- it holds no credential that can own it',
   );
 });
+
+// ---------------------------------------------------------------------------
+// APP-103 / DEBT-0003: the bounded-pause invariant.
+//
+// The scenario these cover is the one that makes an unmonitored watchdog
+// dangerous: an agent is parked (that is how the workaround preempts
+// Paperclip's scheduler), and the bookkeeping that would get it back out is
+// gone or broken. The normal `pendingActions` path cannot help, because the
+// pending action is exactly what was lost. The sweep must get the agent back
+// anyway, off nothing but "we parked this, and it is long past due".
+// ---------------------------------------------------------------------------
+
+async function seedState(mutate) {
+  const { emptyState } = await import('../lib/quota-retry-watchdog.mjs');
+  const state = emptyState();
+  mutate(state);
+  const { writeFileSync } = await import('node:fs');
+  const stateFile = tmpStateFile();
+  writeFileSync(stateFile, JSON.stringify(state));
+  return stateFile;
+}
+
+const RUN_ARGS = { apiBase: 'http://fake', companyId: 'fake-co', apiKey: null, claudeConfigDir: '/tmp', lookbackMinutes: 180, dryRun: true };
+
+test('bounded pause: an agent parked by the watchdog with its pending resume LOST is force-resumed anyway', async () => {
+  const nowMs = Date.now();
+  // The state a crash mid-write (or a lost/rolled-back state file) leaves
+  // behind: the pause is remembered, the scheduled resume that would undo it
+  // is not. Before APP-103 this agent stayed paused forever.
+  const stateFile = await seedState((state) => {
+    state.pausedAgents['agent-cto'] = {
+      pausedAtMs: nowMs - 3 * 3_600_000,
+      scheduledResumeAtMs: nowMs - 40 * 60_000, // due 40min ago, well past the 10min margin
+      kind: 'quota',
+      runId: 'run-lost',
+    };
+  });
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.equal(Object.keys(finalState.pendingActions).length, 0, 'there was never a pending action to fire');
+  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP force-resuming agent=CTO')), 'the sweep must catch it');
+  assert.ok(logs.some((l) => l.includes('DRY-RUN would run: paperclipai agent resume agent-cto')));
+  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP woke agent=CTO')), 'and wake it, so it does not sit idle until its next heartbeat');
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined, 'the claim is released once the resume lands');
+});
+
+test('bounded pause: a not-yet-overdue pause is left alone (fail open, but not trigger-happy)', async () => {
+  const nowMs = Date.now();
+  const stateFile = await seedState((state) => {
+    state.pausedAgents['agent-cto'] = {
+      pausedAtMs: nowMs - 60_000,
+      scheduledResumeAtMs: nowMs + 3 * 3_600_000, // a real quota wait still in progress
+      kind: 'quota',
+      runId: 'run-live',
+    };
+  });
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(!logs.some((l) => l.includes('PAUSE-SWEEP')), 'a legitimate multi-hour quota wait must not be cut short');
+  assert.ok(finalState.pausedAgents['agent-cto'], 'the claim is still held');
+});
+
+test('bounded pause: an overdue claim on an agent that is no longer paused is reconciled, not re-resumed', async () => {
+  const nowMs = Date.now();
+  const stateFile = await seedState((state) => {
+    state.pausedAgents['agent-cto'] = {
+      pausedAtMs: nowMs - 3 * 3_600_000,
+      scheduledResumeAtMs: nowMs - 40 * 60_000,
+      kind: 'quota',
+      runId: 'run-x',
+    };
+  });
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]], // an operator already resumed it
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP agent=CTO is already idle')));
+  assert.ok(!logs.some((l) => l.includes('paperclipai agent resume')), 'no redundant resume call');
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined);
+});
+
+test('bounded pause: a claim on an agent that no longer exists is dropped rather than swept forever', async () => {
+  const nowMs = Date.now();
+  const stateFile = await seedState((state) => {
+    state.pausedAgents['agent-gone'] = {
+      pausedAtMs: nowMs - 20 * 3_600_000,
+      scheduledResumeAtMs: nowMs - 19 * 3_600_000,
+      kind: 'backoff',
+      runId: 'run-z',
+    };
+  });
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(logs.some((l) => l.includes('no longer in the company')));
+  assert.equal(finalState.pausedAgents['agent-gone'], undefined);
+});
+
+test('bounded pause: the watchdog claims the pauses it issues, so a later sweep can undo them', async () => {
+  const nowMs = Date.now();
+  const failedAtIso = new Date(nowMs).toISOString();
+  const runs = [
+    {
+      id: 'run-claim',
+      agentId: 'agent-cto',
+      status: 'failed',
+      errorCode: 'provider_quota',
+      error: formatResetText(nowMs + 2 * 3_600_000),
+      createdAt: failedAtIso,
+      startedAt: failedAtIso,
+      finishedAt: failedAtIso,
+      usageJson: null,
+    },
+  ];
+
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', runs],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile: tmpStateFile() }, { log: () => {} }),
+  );
+
+  const claim = finalState.pausedAgents['agent-cto'];
+  assert.ok(claim, 'pausing an agent must be recorded, or the sweep has nothing to act on');
+  assert.equal(claim.kind, 'quota');
+  assert.equal(claim.runId, 'run-claim');
+  assert.equal(claim.scheduledResumeAtMs, finalState.pendingActions['agent-cto'].scheduledAtMs);
+});
+
+test('bounded pause: a pause the watchdog did NOT issue is never claimed — a founder\'s deliberate pause must not be silently undone', async () => {
+  const nowMs = Date.now();
+  const failedAtIso = new Date(nowMs).toISOString();
+  const runs = [
+    {
+      id: 'run-operator-paused',
+      agentId: 'agent-cto',
+      status: 'failed',
+      errorCode: 'provider_quota',
+      error: formatResetText(nowMs + 2 * 3_600_000),
+      createdAt: failedAtIso,
+      startedAt: failedAtIso,
+      finishedAt: failedAtIso,
+      usageJson: null,
+    },
+  ];
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', runs],
+      // Already paused, and the watchdog's state has no claim on it: this is
+      // an operator pause that happens to coincide with a quota failure.
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile: tmpStateFile() }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(logs.some((l) => l.includes('PAUSE-OWNERSHIP')));
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined, 'the sweep must not take ownership of a pause it did not make');
+});
+
+test('a normal due-fire clears the pause claim, so the sweep has nothing left to do', async () => {
+  const { emptyState, setPendingAction, recordWatchdogPause } = await import('../lib/quota-retry-watchdog.mjs');
+  const state = emptyState();
+  setPendingAction(state, 'agent-cto', { kind: 'quota', runId: 'run-x', scheduledAtMs: 1000, reason: 'resuming after provider_quota reset (watchdog)' });
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: 500, scheduledResumeAtMs: 1000, kind: 'quota', runId: 'run-x' });
+
+  const { writeFileSync } = await import('node:fs');
+  const stateFile = tmpStateFile();
+  writeFileSync(stateFile, JSON.stringify(state));
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(logs.some((l) => l.includes('RESUME agent=CTO')), 'the ordinary path handles it');
+  assert.ok(!logs.some((l) => l.includes('PAUSE-SWEEP')), 'and the sweep does not fire a second, redundant resume');
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined);
+  assert.equal(finalState.pendingActions['agent-cto'], undefined);
+});
+

@@ -238,7 +238,7 @@ export function classifyForWatchdog(run) {
 
 /** A fresh, empty state object -- same shape `loadState` falls back to when the file does not exist yet. */
 export function emptyState() {
-  return { handledRunIds: {}, agents: {}, pendingActions: {} };
+  return { handledRunIds: {}, agents: {}, pendingActions: {}, pausedAgents: {} };
 }
 
 function ensureAgent(state, agentId) {
@@ -321,4 +321,124 @@ export function clearPendingAction(state, agentId) {
 /** Pending actions whose `scheduledAtMs` has arrived, as `[agentId, action]` pairs. */
 export function duePendingActions(state, nowMs) {
   return Object.entries(state.pendingActions).filter(([, action]) => action.scheduledAtMs <= nowMs);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded-pause invariant (APP-103 / DEBT-0003)
+// ---------------------------------------------------------------------------
+//
+// `pendingActions` schedules the resume. `pausedAgents` is a *separate*
+// registry of "agents this watchdog actually put into the paused state, and
+// has not yet successfully got back out of." The two are deliberately not
+// the same record, because they answer different questions and are cleared
+// at different moments:
+//
+//   pendingActions[agentId]  -- "when should this agent come back?"
+//                               cleared as soon as the resume is attempted.
+//   pausedAgents[agentId]    -- "is an agent still parked because of us?"
+//                               cleared only once a resume has actually
+//                               succeeded (or the agent is observed
+//                               un-paused by other means).
+//
+// Collapsing them would reintroduce the exact failure APP-103 is about: if a
+// `resume` call fails persistently, or the scheduled action is lost, the one
+// record that remembers an agent is parked would be gone and the agent would
+// sit paused forever with no symptom other than quietly not working.
+//
+// FAIL OPEN. A premature resume costs one failed run (the agent wakes, hits
+// the quota again, and the watchdog re-pauses it on the next pass). A missed
+// resume costs an agent indefinitely. Whenever the two are in tension, resume.
+
+/**
+ * Records that this watchdog has parked `agentId`. Overwrites any previous
+ * entry's schedule (e.g. a second quota failure arriving before the first
+ * reset).
+ *
+ * `stillPaused` decides what happens to `pausedAtMs`, and the distinction is
+ * load-bearing for the maximum-pause ceiling:
+ *
+ *  - `true` (the agent is still in the paused state we put it in): keep the
+ *    ORIGINAL `pausedAtMs`, so the ceiling measures real wall-clock time
+ *    parked and cannot be pushed out indefinitely by a stream of repeated
+ *    failures.
+ *  - `false` (the agent was running and we have just newly parked it): start
+ *    the clock over. The previous claim was stale -- whatever it recorded,
+ *    the agent demonstrably was not parked, so carrying its timestamp forward
+ *    would hand the new pause an already-expired ceiling and the very next
+ *    sweep would force-resume an agent we deliberately parked one line ago.
+ */
+export function recordWatchdogPause(state, agentId, { pausedAtMs, scheduledResumeAtMs, kind, runId, issueId = null, stillPaused = true }) {
+  if (!state.pausedAgents) state.pausedAgents = {};
+  const existing = stillPaused ? state.pausedAgents[agentId] : null;
+  state.pausedAgents[agentId] = {
+    pausedAtMs: existing?.pausedAtMs ?? pausedAtMs,
+    scheduledResumeAtMs,
+    kind,
+    runId,
+    issueId,
+  };
+  return state.pausedAgents[agentId];
+}
+
+/** Forgets a watchdog pause -- called only after a resume actually succeeded, or once the agent is observed no longer paused. */
+export function clearWatchdogPause(state, agentId) {
+  if (state.pausedAgents) delete state.pausedAgents[agentId];
+}
+
+export function getWatchdogPause(state, agentId) {
+  return state.pausedAgents?.[agentId] || null;
+}
+
+/**
+ * A timestamp only counts as usable if it is an actual finite positive
+ * number. `Number(null)` is 0 and `Number('')` is 0, both of which would
+ * sail through a bare `Number.isFinite` check and read as "January 1970" --
+ * i.e. as a resume that is decades overdue rather than as the missing value
+ * it really is. The distinction matters because the two produce different
+ * sweep reasons, and the operator reading the log needs to know whether a
+ * schedule was missed or never written.
+ */
+function usableTimestamp(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : NaN;
+}
+
+/**
+ * Watchdog-owned pauses that have outstayed their welcome, as
+ * `[agentId, entry, reason]` triples.
+ *
+ * Two independent ceilings, because they catch different faults:
+ *
+ *  - `overdueMarginMs` past the entry's own `scheduledResumeAtMs`: the
+ *    normal path already fired (or should have) by then, so being past it
+ *    means the resume never happened -- the `resume` call is failing, the
+ *    pending action was lost, or a pass errored out before reaching it. The
+ *    margin must comfortably exceed several polling intervals so a routine
+ *    due-fire always wins the race and this never double-resumes.
+ *
+ *  - `maxPauseMs` since `pausedAtMs`, regardless of schedule: catches an
+ *    entry whose `scheduledResumeAtMs` is itself wrong -- missing, NaN, or
+ *    parsed far into the future from a mangled reset string. Without this,
+ *    a single bad parse could park an agent for days and the first ceiling
+ *    would never trigger, because it trusts the very number that is wrong.
+ *
+ * Both are evaluated against `nowMs`; either one firing is enough.
+ */
+export function overduePauses(state, nowMs, { overdueMarginMs, maxPauseMs }) {
+  const out = [];
+  for (const [agentId, entry] of Object.entries(state.pausedAgents || {})) {
+    const scheduled = usableTimestamp(entry.scheduledResumeAtMs);
+    const pausedAt = usableTimestamp(entry.pausedAtMs);
+    if (Number.isFinite(scheduled) && nowMs > scheduled + overdueMarginMs) {
+      out.push([agentId, entry, `resume was due ${Math.round((nowMs - scheduled) / 60_000)}min ago and has not happened`]);
+      continue;
+    }
+    if (!Number.isFinite(scheduled)) {
+      out.push([agentId, entry, 'pause entry has no usable scheduled resume time']);
+      continue;
+    }
+    if (Number.isFinite(pausedAt) && nowMs - pausedAt > maxPauseMs) {
+      out.push([agentId, entry, `paused for ${Math.round((nowMs - pausedAt) / 3_600_000)}h, past the maximum-pause ceiling`]);
+    }
+  }
+  return out;
 }

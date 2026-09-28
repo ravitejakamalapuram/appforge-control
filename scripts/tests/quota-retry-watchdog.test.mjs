@@ -5,6 +5,10 @@ import {
   computeBackoffDelayMs,
   classifyForWatchdog,
   emptyState,
+  recordWatchdogPause,
+  clearWatchdogPause,
+  getWatchdogPause,
+  overduePauses,
   isHandled,
   markHandled,
   pruneHandled,
@@ -316,4 +320,124 @@ test('readRunIssueId: tolerates the snapshot shapes that are not objects, and bl
   assert.equal(readRunIssueId({ contextSnapshot: { issueId: '   ' } }), null, 'whitespace is not an issue id');
   assert.equal(readRunIssueId({ contextSnapshot: { issueId: ' issue-i ' } }), 'issue-i', 'ids are trimmed');
   assert.equal(readRunIssueId(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// Bounded-pause invariant (APP-103 / DEBT-0003)
+// ---------------------------------------------------------------------------
+
+const SWEEP = { overdueMarginMs: 10 * 60_000, maxPauseMs: 12 * 3_600_000 };
+
+test('a pause whose resume is not yet due is not swept', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now, scheduledResumeAtMs: now + 3_600_000, kind: 'quota', runId: 'r1' });
+  assert.deepEqual(overduePauses(state, now + 60_000, SWEEP), []);
+});
+
+test('a pause still inside the overdue margin is not swept — a normal due-fire must always win the race', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now, scheduledResumeAtMs: now + 1000, kind: 'quota', runId: 'r1' });
+  // 5 minutes past the scheduled resume: several polling passes have had a
+  // chance, but we are still inside the 10min margin.
+  assert.deepEqual(overduePauses(state, now + 1000 + 5 * 60_000, SWEEP), []);
+});
+
+test('a pause past its scheduled resume + margin is swept, and says how late it is', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now, scheduledResumeAtMs: now + 1000, kind: 'quota', runId: 'r1' });
+  const swept = overduePauses(state, now + 1000 + 25 * 60_000, SWEEP);
+  assert.equal(swept.length, 1);
+  const [agentId, entry, why] = swept[0];
+  assert.equal(agentId, 'agent-cto');
+  assert.equal(entry.runId, 'r1');
+  assert.match(why, /25min ago/);
+});
+
+test('a pause with an unusable scheduled resume is swept immediately — the ceiling cannot trust the number that is wrong', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  for (const bad of [undefined, null, NaN, 'soon']) {
+    const s = emptyState();
+    recordWatchdogPause(s, 'agent-x', { pausedAtMs: now, scheduledResumeAtMs: bad, kind: 'quota', runId: 'r' });
+    const swept = overduePauses(s, now + 1000, SWEEP);
+    assert.equal(swept.length, 1, `expected a sweep for scheduledResumeAtMs=${String(bad)}`);
+    assert.match(swept[0][2], /no usable scheduled resume time/);
+  }
+  assert.ok(now);
+});
+
+test('the absolute maximum-pause ceiling fires even when the schedule claims the resume is still in the future', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  // A mangled reset parse that landed a week out: the first ceiling never
+  // triggers, because it believes the schedule. This is what the second one
+  // is for.
+  recordWatchdogPause(state, 'agent-cto', {
+    pausedAtMs: now,
+    scheduledResumeAtMs: now + 7 * 86_400_000,
+    kind: 'quota',
+    runId: 'r1',
+  });
+  assert.deepEqual(overduePauses(state, now + 11 * 3_600_000, SWEEP), [], 'inside 12h: still trusted');
+  const swept = overduePauses(state, now + 13 * 3_600_000, SWEEP);
+  assert.equal(swept.length, 1);
+  assert.match(swept[0][2], /maximum-pause ceiling/);
+});
+
+test('re-recording a pause refreshes the schedule but keeps the original pausedAtMs, so repeated failures cannot push the ceiling out forever', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now, scheduledResumeAtMs: now + 1000, kind: 'quota', runId: 'r1' });
+  recordWatchdogPause(state, 'agent-cto', {
+    pausedAtMs: now + 11 * 3_600_000,
+    scheduledResumeAtMs: now + 30 * 86_400_000,
+    kind: 'quota',
+    runId: 'r2',
+  });
+  const entry = getWatchdogPause(state, 'agent-cto');
+  assert.equal(entry.pausedAtMs, now, 'the ceiling measures real time parked, not time since the latest failure');
+  assert.equal(entry.runId, 'r2', 'but the rest of the entry is refreshed');
+  assert.equal(overduePauses(state, now + 13 * 3_600_000, SWEEP).length, 1);
+});
+
+test('clearWatchdogPause removes the claim, and a state with no pausedAgents key at all is handled', () => {
+  const state = emptyState();
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: 1, scheduledResumeAtMs: 2, kind: 'quota', runId: 'r' });
+  clearWatchdogPause(state, 'agent-cto');
+  assert.equal(getWatchdogPause(state, 'agent-cto'), null);
+  // A state file written by the pre-APP-103 watchdog has no pausedAgents key.
+  const legacy = { handledRunIds: {}, agents: {}, pendingActions: {} };
+  assert.deepEqual(overduePauses(legacy, Date.now(), SWEEP), []);
+  assert.doesNotThrow(() => clearWatchdogPause(legacy, 'agent-cto'));
+  assert.equal(getWatchdogPause(legacy, 'agent-cto'), null);
+});
+
+test('a NEW pause on an agent that was running restarts the ceiling clock, so a stale claim cannot get it force-resumed immediately', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  // A claim left over from a force-resume that kept failing: 20h old, so
+  // already past the 12h ceiling.
+  recordWatchdogPause(state, 'agent-cto', {
+    pausedAtMs: now - 20 * 3_600_000,
+    scheduledResumeAtMs: now - 19 * 3_600_000,
+    kind: 'quota',
+    runId: 'old',
+  });
+  assert.equal(overduePauses(state, now, SWEEP).length, 1, 'sanity: the stale claim is sweepable');
+
+  // The agent is observed *running*, then hits a fresh quota limit and is
+  // newly paused with a legitimate 3h wait. Carrying the old pausedAtMs
+  // forward would make this brand-new pause instantly overdue.
+  recordWatchdogPause(state, 'agent-cto', {
+    pausedAtMs: now,
+    scheduledResumeAtMs: now + 3 * 3_600_000,
+    kind: 'quota',
+    runId: 'new',
+    stillPaused: false,
+  });
+  assert.equal(getWatchdogPause(state, 'agent-cto').pausedAtMs, now);
+  assert.deepEqual(overduePauses(state, now + 1000, SWEEP), [], 'the fresh pause must be allowed to run its course');
 });

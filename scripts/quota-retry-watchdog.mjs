@@ -54,7 +54,7 @@
 // Log: logs/quota-retry-watchdog.log (every detection, parse, pause,
 // resume, wake, and backoff decision — plain appended lines, one per
 // action, so `tail -f` during an incident is legible without jq).
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
@@ -74,6 +74,10 @@ import {
   clearPendingAction,
   duePendingActions,
   readRunIssueId,
+  recordWatchdogPause,
+  clearWatchdogPause,
+  getWatchdogPause,
+  overduePauses,
 } from './lib/quota-retry-watchdog.mjs';
 import {
   partitionRecoveryCollateral,
@@ -81,6 +85,7 @@ import {
   formatBoardOnlyReport,
   pausedRunIdsFromState,
 } from './lib/quota-pause-collateral.mjs';
+import { notifierConfigFromEnv, pingPassSucceeded, alertPassFailed } from './lib/watchdog-notify.mjs';
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -117,6 +122,21 @@ const BACKOFF_CAP_MS = 30 * 60_000;
 // polling interval (1-2min) so a missed poll (Mac asleep, script crash)
 // still catches up on the next run; bounded so the fetch+filter stays cheap.
 const DEFAULT_LOOKBACK_MINUTES = 180;
+
+// APP-103 / DEBT-0003 -- the bounded-pause invariant. How far past its own
+// scheduled resume a watchdog-owned pause may drift before the next pass
+// force-resumes it regardless of whether the original reason is still
+// understood. 10 minutes is ~6 polling intervals (StartInterval: 90), so a
+// normal due-fire always wins this race comfortably; anything still parked
+// past it is parked because something broke, not because it is early.
+const OVERDUE_RESUME_MARGIN_MS = 10 * 60_000;
+
+// Absolute ceiling on how long this watchdog will leave any agent parked,
+// independent of what its schedule claims. Claude session limits reset well
+// inside 5 hours, so 12h cannot cut short a legitimate quota wait -- it only
+// fires when the schedule itself is wrong (unparseable reset text, corrupted
+// state, a clock jump).
+const MAX_PAUSE_MS = 12 * 3_600_000;
 
 // How long a handled-run-id stays in the state file. Must comfortably
 // exceed DEFAULT_LOOKBACK_MINUTES so a run never "ages out" of the handled
@@ -169,7 +189,14 @@ function loadState(stateFile) {
   if (!existsSync(stateFile)) return emptyState();
   try {
     const parsed = JSON.parse(readFileSync(stateFile, 'utf8'));
-    return { ...emptyState(), ...parsed, handledRunIds: parsed.handledRunIds || {}, agents: parsed.agents || {}, pendingActions: parsed.pendingActions || {} };
+    return {
+      ...emptyState(),
+      ...parsed,
+      handledRunIds: parsed.handledRunIds || {},
+      agents: parsed.agents || {},
+      pendingActions: parsed.pendingActions || {},
+      pausedAgents: parsed.pausedAgents || {},
+    };
   } catch (err) {
     // A corrupt state file must never crash the watchdog — worst case we
     // re-handle a run we already handled once (idempotent CLI calls) rather
@@ -178,9 +205,18 @@ function loadState(stateFile) {
   }
 }
 
+// Write-then-rename, not a plain write: a crash (or a launchd SIGKILL at
+// ExitTimeOut) partway through a direct `writeFileSync` leaves a truncated
+// JSON file, which `loadState` correctly refuses to parse and replaces with
+// an empty state -- and an empty state is precisely how the watchdog forgets
+// that it has an agent parked (APP-103). `rename` within the same directory
+// is atomic, so the state file is only ever the old complete version or the
+// new complete version.
 function saveState(stateFile, state) {
   mkdirSync(dirname(stateFile), { recursive: true });
-  writeFileSync(stateFile, JSON.stringify(state, null, 2) + '\n');
+  const tmp = `${stateFile}.tmp`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n');
+  renameSync(tmp, stateFile);
 }
 
 // -- Paperclip HTTP API (read-only: run + agent listing) ------------------
@@ -283,9 +319,95 @@ function wakeAgent(agentId, reason, ctx, { issueId = null } = {}) {
   return paperclipCli(args, { ...ctx, describe: `wake ${agentId}` });
 }
 
+// The pause we just lifted cancelled this agent's in-flight runs with
+// `errorCode: agent_paused`, which Paperclip's recovery sweep cannot classify
+// as a quota wait -- so it board-escalated each one to `blocked` (APP-164).
+// Find them BEFORE the wake, so the wake itself can tell the agent what to
+// clear rather than leaving it to notice. Returns '' when there is nothing to
+// say, and never throws: reporting is diagnostic, and a failure here must not
+// strand a resume that already succeeded, nor block the wake.
+async function collateralNoteFor(args, state, agentId, { name, issueId, log }) {
+  try {
+    const candidates = await fetchAgentRecoveryCandidates(args, agentId);
+    const { handBack, boardOnly } = partitionRecoveryCollateral(candidates, {
+      pausedRunIds: pausedRunIdsFromState(state),
+    });
+    for (const line of formatCollateralReport(handBack, { agentName: name })) log(line);
+    for (const line of formatBoardOnlyReport(boardOnly, { agentName: name })) log(line);
+    if (!handBack.length) return '';
+    // `--resolve` needs a TASK-BOUND run (it exits 3 otherwise). Whether
+    // this wake produces one is exactly what `issueId` decides, so the
+    // advice differs: a bound wake can drain the collateral in place, an
+    // unbound one cannot and must not be told to try.
+    return (
+      ` Note: ${handBack.length} of your issue(s) (${handBack.map((e) => e.identifier).join(', ')}) ` +
+      'were set to blocked by the recovery sweep misreading that pause cancellation, not by a real ' +
+      'dependency. ' +
+      (issueId
+        ? 'This wake is task-bound, so you can clear them here: run `node ' +
+          'scripts/clear-my-recovery-collateral.mjs --resolve`.'
+        : 'This wake is agent-level and UNBOUND, so `node scripts/clear-my-recovery-collateral.mjs ' +
+          '--resolve` will refuse with exit 3 — it cannot attribute the write. Run it report-only ' +
+          'here to see the list, and leave the clearing to a task-bound heartbeat.') +
+      ' Do not release any checkout you take on them (release unassigns and orphans them to the board).'
+    );
+  } catch (err) {
+    log(`COLLATERAL lookup failed agent=${name}: ${err.message}`);
+    return '';
+  }
+}
+
+function wakeLogLine(name, reason, collateralNote, issueId) {
+  return (
+    `WAKE agent=${name} reason="${reason}"${collateralNote ? ' (+collateral note)' : ''} ` +
+    (issueId
+      ? `issue=${issueId} (task-bound: the resumed run can PATCH and comment)`
+      : 'issue=none (UNBOUND: the resumed run will be refused issue PATCH/comment -- APP-181)')
+  );
+}
+
+// -- bounded-pause bookkeeping (APP-103) ------------------------------------
+
+/**
+ * Records, or refreshes, this watchdog's claim that `agentId` is parked.
+ *
+ * The `alreadyPaused` distinction matters and is the reason this is a
+ * function rather than a bare `recordWatchdogPause` call. An agent can be
+ * paused for two very different reasons:
+ *
+ *  - this watchdog parked it on an earlier pass (there is already a registry
+ *    entry) -- refresh the schedule, keep the original `pausedAtMs`, and keep
+ *    owning it;
+ *  - a human operator parked it deliberately (no registry entry) -- do NOT
+ *    take ownership. The bounded-pause sweep force-resumes what it owns, and
+ *    silently undoing a founder's deliberate pause would be a far worse bug
+ *    than the one this is fixing.
+ */
+function notePause(state, agentId, { alreadyPaused, nowMs, scheduledResumeAtMs, kind, runId, issueId = null, log, name }) {
+  if (alreadyPaused && !getWatchdogPause(state, agentId)) {
+    log(
+      `PAUSE-OWNERSHIP agent=${name} was already paused by someone other than this watchdog — ` +
+        `scheduling its resume but not claiming the pause (it will not be force-resumed by the sweep)`,
+    );
+    return;
+  }
+  recordWatchdogPause(state, agentId, { pausedAtMs: nowMs, scheduledResumeAtMs, kind, runId, issueId, stillPaused: alreadyPaused });
+}
+
 // -- main pass --------------------------------------------------------------
 
-export async function runOnce(args, { log }) {
+/**
+ * One watchdog pass.
+ *
+ * `recordError` (APP-103) collects non-fatal, per-agent failures so a single
+ * broken `resume` no longer aborts the whole pass. Before this, one failing
+ * CLI call threw out of `runOnce`, which meant (a) nothing after it ran and
+ * (b) `saveState` was never reached, so the pass's bookkeeping was discarded
+ * too. It is optional so existing callers/tests that only pass `{ log }`
+ * keep working; `main` supplies one and uses it to decide whether the pass
+ * counts as healthy for liveness-signalling purposes.
+ */
+export async function runOnce(args, { log, recordError = () => {} }) {
   const nowMs = Date.now();
   const state = loadState(args.stateFile);
   const cliCtx = { claudeConfigDir: args.claudeConfigDir, dryRun: args.dryRun, log };
@@ -336,9 +458,25 @@ export async function runOnce(args, { log }) {
       if (alreadyPaused) {
         log(`QUOTA agent=${name} already paused, skipping duplicate pause call`);
       } else {
-        await pauseAgent(run.agentId, cliCtx);
+        try {
+          await pauseAgent(run.agentId, cliCtx);
+        } catch (err) {
+          recordError(`pause ${name} (quota run=${run.id}) failed: ${err.message}`);
+          continue; // not marked handled -- the next pass retries this run
+        }
         log(`QUOTA paused agent=${name} (run=${run.id}) so Paperclip's scheduler cannot retry it early`);
       }
+
+      notePause(state, run.agentId, {
+        alreadyPaused,
+        nowMs,
+        scheduledResumeAtMs: scheduledAtMs,
+        kind: 'quota',
+        runId: run.id,
+        issueId: readRunIssueId(run),
+        log,
+        name,
+      });
 
       setPendingAction(state, run.agentId, {
         kind: 'quota',
@@ -364,9 +502,25 @@ export async function runOnce(args, { log }) {
       if (alreadyPaused) {
         log(`TRANSIENT agent=${name} already paused, skipping duplicate pause call`);
       } else {
-        await pauseAgent(run.agentId, cliCtx);
+        try {
+          await pauseAgent(run.agentId, cliCtx);
+        } catch (err) {
+          recordError(`pause ${name} (transient run=${run.id}) failed: ${err.message}`);
+          continue; // not marked handled -- the next pass retries this run
+        }
         log(`TRANSIENT paused agent=${name} (run=${run.id}) pending backoff`);
       }
+
+      notePause(state, run.agentId, {
+        alreadyPaused,
+        nowMs,
+        scheduledResumeAtMs: scheduledAtMs,
+        kind: 'backoff',
+        runId: run.id,
+        issueId: readRunIssueId(run),
+        log,
+        name,
+      });
 
       setPendingAction(state, run.agentId, {
         kind: 'backoff',
@@ -381,10 +535,19 @@ export async function runOnce(args, { log }) {
     }
   }
 
-  // Fire any scheduled resume+wake whose time has arrived.
+  // Fire any scheduled resume+wake whose time has arrived. A failure here is
+  // logged and recorded but does NOT abort the pass: the pending action is
+  // left in place so the next pass retries it, and the bounded-pause sweep
+  // below is what guarantees the agent gets out eventually even if this keeps
+  // failing.
   for (const [agentId, action] of duePendingActions(state, nowMs)) {
     const name = agentName(agentId);
-    await resumeAgent(agentId, cliCtx);
+    try {
+      await resumeAgent(agentId, cliCtx);
+    } catch (err) {
+      recordError(`resume ${name} (pending ${action.kind} for run=${action.runId}) failed: ${err.message}`);
+      continue;
+    }
     log(`RESUME agent=${name} (was pending ${action.kind} for run=${action.runId})`);
     // `action.issueId` is absent for pending actions written by a watchdog
     // build older than APP-181, and null for an interrupted run the runtime
@@ -392,52 +555,86 @@ export async function runOnce(args, { log }) {
     // says so, because that run will hit the 403 this binding exists to
     // prevent and the operator should not have to infer it.
     const issueId = action.issueId || null;
+    const collateralNote = await collateralNoteFor(args, state, agentId, { name, issueId, log });
 
-    // The pause we just lifted cancelled this agent's in-flight runs with
-    // `errorCode: agent_paused`, which Paperclip's recovery sweep cannot
-    // classify as a quota wait -- so it board-escalated each one to `blocked`.
-    // Find them BEFORE the wake, so the wake itself can tell the agent what to
-    // clear rather than leaving it to notice.
-    let collateralNote = '';
+    // Only now, after the collateral lookup has read `handledRunIds`, and
+    // before the wake: the resume already landed, so a wake that fails below
+    // must not leave either record claiming the agent is still parked.
+    clearPendingAction(state, agentId);
+    clearWatchdogPause(state, agentId);
     try {
-      const candidates = await fetchAgentRecoveryCandidates(args, agentId);
-      const { handBack, boardOnly } = partitionRecoveryCollateral(candidates, {
-        pausedRunIds: pausedRunIdsFromState(state),
-      });
-      for (const line of formatCollateralReport(handBack, { agentName: name })) log(line);
-      for (const line of formatBoardOnlyReport(boardOnly, { agentName: name })) log(line);
-      if (handBack.length) {
-        // `--resolve` needs a TASK-BOUND run (it exits 3 otherwise). Whether
-        // this wake produces one is exactly what `issueId` decides, so the
-        // advice differs: a bound wake can drain the collateral in place, an
-        // unbound one cannot and must not be told to try.
-        collateralNote =
-          ` Note: ${handBack.length} of your issue(s) (${handBack.map((e) => e.identifier).join(', ')}) ` +
-          'were set to blocked by the recovery sweep misreading that pause cancellation, not by a real ' +
-          'dependency. ' +
-          (issueId
-            ? 'This wake is task-bound, so you can clear them here: run `node ' +
-              'scripts/clear-my-recovery-collateral.mjs --resolve`.'
-            : 'This wake is agent-level and UNBOUND, so `node scripts/clear-my-recovery-collateral.mjs ' +
-              '--resolve` will refuse with exit 3 — it cannot attribute the write. Run it report-only ' +
-              'here to see the list, and leave the clearing to a task-bound heartbeat.') +
-          ' Do not release any checkout you take on them (release unassigns and orphans them to the board).';
-      }
+      await wakeAgent(agentId, `${action.reason}${collateralNote}`, cliCtx, { issueId });
+      log(wakeLogLine(name, action.reason, collateralNote, issueId));
     } catch (err) {
-      // Reporting is diagnostic. A failure here must not strand the resume
-      // that already succeeded above, nor block the wake below.
-      log(`COLLATERAL lookup failed agent=${name}: ${err.message}`);
+      // The resume already landed, so the agent is no longer parked -- it
+      // will pick work up on its own next heartbeat. A failed wake is a
+      // latency problem, not the stuck-agent problem this watchdog exists
+      // to prevent, so it must not undo the resume bookkeeping above.
+      recordError(`wake ${name} failed after a successful resume: ${err.message}`);
+    }
+  }
+
+  // --- APP-103 / DEBT-0003: the bounded-pause invariant ------------------
+  //
+  // Everything above depends on bookkeeping that can go wrong: a pending
+  // action can be lost with the state file, a `resume` can fail every time,
+  // a reset time can be parsed into nonsense. This sweep is the backstop
+  // that does not depend on any of that being right -- it asks only "is an
+  // agent still parked because of us, long past when it should have been?"
+  // and, if so, resumes it. FAIL OPEN: a premature resume costs one failed
+  // run; a missed resume costs an agent indefinitely.
+  for (const [agentId, entry, why] of overduePauses(state, nowMs, {
+    overdueMarginMs: OVERDUE_RESUME_MARGIN_MS,
+    maxPauseMs: MAX_PAUSE_MS,
+  })) {
+    const name = agentName(agentId);
+    const known = agentById[agentId];
+
+    if (!known) {
+      // The agent no longer exists in the company (deleted, moved). Nothing
+      // to resume; drop the registry entry so it stops being swept forever.
+      log(`PAUSE-SWEEP agent=${agentId} is no longer in the company, dropping stale pause record`);
+      clearWatchdogPause(state, agentId);
+      clearPendingAction(state, agentId);
+      continue;
     }
 
-    await wakeAgent(agentId, `${action.reason}${collateralNote}`, cliCtx, { issueId });
-    log(
-      `WAKE agent=${name} reason="${action.reason}"${collateralNote ? ' (+collateral note)' : ''} ` +
-        (issueId
-          ? `issue=${issueId} (task-bound: the resumed run can PATCH and comment)`
-          : 'issue=none (UNBOUND: the resumed run will be refused issue PATCH/comment -- APP-181)'),
-    );
+    if (known.status !== 'paused') {
+      // Someone (an operator, or a resume we already issued) got it out
+      // already. Reconcile silently-ish rather than issuing a redundant
+      // resume.
+      log(`PAUSE-SWEEP agent=${name} is already ${known.status}, clearing stale pause record (${why})`);
+      clearWatchdogPause(state, agentId);
+      clearPendingAction(state, agentId);
+      continue;
+    }
 
+    log(`PAUSE-SWEEP force-resuming agent=${name} — ${why} (pause kind=${entry.kind} run=${entry.runId})`);
+    try {
+      await resumeAgent(agentId, cliCtx);
+    } catch (err) {
+      // Keep the registry entry: this is exactly the persistently-failing
+      // resume case, and the entry is the only thing that will make the
+      // next pass try again. Alert on it — a force-resume that cannot land
+      // is an agent nobody is getting back without a human.
+      recordError(`FORCE-RESUME of paused agent ${name} failed (${why}): ${err.message}`);
+      continue;
+    }
+    log(`PAUSE-SWEEP resumed agent=${name}`);
+    // Same APP-181 binding as the due-fire path. Prefer the registry entry's
+    // own issueId: the sweep's whole job is to cope with a pending action that
+    // was lost, and the registry is what survives that.
+    const issueId = entry.issueId || state.pendingActions?.[agentId]?.issueId || null;
+    const reason = `force-resuming a pause the watchdog could not account for: ${why}`;
+    const collateralNote = await collateralNoteFor(args, state, agentId, { name, issueId, log });
+    clearWatchdogPause(state, agentId);
     clearPendingAction(state, agentId);
+    try {
+      await wakeAgent(agentId, `${reason}${collateralNote}`, cliCtx, { issueId });
+      log(`PAUSE-SWEEP ${wakeLogLine(name, reason, collateralNote, issueId)}`);
+    } catch (err) {
+      recordError(`wake ${name} failed after a successful force-resume: ${err.message}`);
+    }
   }
 
   pruneHandled(state, nowMs, HANDLED_RETENTION_MS);
@@ -448,14 +645,44 @@ export async function runOnce(args, { log }) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const log = makeLogger(args.logFile);
-  log(`--- pass start (dryRun=${args.dryRun}) ---`);
+
+  // APP-103 / DEBT-0003: liveness signalling, same pattern backup.sh and
+  // sync.sh already use. Degrades to a silent no-op when the env vars are
+  // absent (they live in the plist's EnvironmentVariables, which is a
+  // founder/operator step because launchd does not source `.envrc`), so an
+  // un-provisioned watchdog still does its real job without crashing.
+  const notifier = notifierConfigFromEnv(process.env);
+  const errors = [];
+  const recordError = (message) => {
+    errors.push(message);
+    log(`ERROR ${message}`);
+  };
+
+  log(`--- pass start (dryRun=${args.dryRun}, liveness=${notifier.enabled ? 'on' : 'off (env not set)'}) ---`);
   try {
-    await runOnce(args, { log });
-    log('--- pass complete ---');
+    await runOnce(args, { log, recordError });
   } catch (err) {
     log(`FATAL ${err.stack || err.message}`);
     process.exitCode = 1;
+    await alertPassFailed(notifier, `pass threw: ${err.message}`, { log });
+    log('--- pass failed ---');
+    return;
   }
+
+  if (errors.length > 0) {
+    // The pass finished -- every agent that could be handled was handled --
+    // but at least one CLI call failed. That is not a healthy pass: the most
+    // likely thing behind it is a `resume` that cannot land, which is the
+    // stuck-agent case this whole issue is about. Alert, and deliberately do
+    // NOT send the success ping, so the healthchecks.io check goes red.
+    process.exitCode = 1;
+    await alertPassFailed(notifier, `${errors.length} error(s): ${errors.join('; ')}`, { log });
+    log(`--- pass complete with ${errors.length} error(s) ---`);
+    return;
+  }
+
+  await pingPassSucceeded(notifier, { log });
+  log('--- pass complete ---');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
