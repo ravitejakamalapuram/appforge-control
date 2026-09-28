@@ -42,7 +42,7 @@ write `DEC-0016` records as a cost.
 | Thing you will read | What it actually is |
 |---|---|
 | `TOOLS.md` "Explicit deny list" | **Cooperative.** Operating instructions for a well-behaved agent. Not a sandbox. |
-| `APPFORGE_AGENT_REPOS=none` | **Cooperative at the API level, partly enforced at the env level.** `agent-launch.sh` really does scrub `GH_TOKEN`/`GITHUB_TOKEN` and reset git's credential helpers — but see `WHAT THIS DOES NOT CLOSE` in that script: the App private key, `~/.ssh`, and `gh auth git-credential` all remain reachable at this uid. |
+| `APPFORGE_AGENT_REPOS=none` | **Cooperative.** `agent-launch.sh` really does scrub `GH_TOKEN`/`GITHUB_TOKEN` and reset git's credential helpers, and that does close the *accidental* path — but it is hygiene inside the boundary, not a boundary. An agent that wants a token re-mints one through `scripts/github-app-token.mjs`; the App private key, `~/.ssh`, and `gh auth git-credential` all remain reachable at this uid. See `WHAT THIS DOES NOT CLOSE` in `scripts/agent-launch.sh`. |
 | Per-run cross-issue write cap (`cross_issue_influence_cap_exceeded`) | **Credentialed writes only.** Never evaluated for an actor presenting no credential. |
 | `issue_write_actor_class_excluded`, responsible-user ceiling, assignee run lock | **Credentialed writes only**, same reason. Real features; not containment. |
 | Run-attribution audit trail | **Advisory.** An unattributed write is possible, so the trail cannot be relied on to name every actor. Knowingly accepted, not an oversight. |
