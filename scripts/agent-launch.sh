@@ -12,15 +12,96 @@
 # reach are closed before exec. Read the NO-REPO section below before
 # changing it - the obvious one-line version of that branch is a privilege
 # ESCALATION, not a restriction.
+#
+# Containment (board approval 2569ea51, APP-60) applies to EVERY path through
+# this script, before the repo scope is even looked at:
+#   Control A - GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM/GIT_CONFIG_NOSYSTEM, so
+#               agents read the AppForge-owned .gitconfig-appforge instead of
+#               the founder's ~/.gitconfig (`!gh auth git-credential`) and
+#               Apple's system gitconfig (`osxkeychain`).
+#   Control B - GH_CONFIG_DIR, a per-run empty dir, so `gh` has no logged-in
+#               founder account to return - by PATH, by absolute path, via a
+#               config helper, or invoked directly.
+# A removes the config path that CALLS the helper; B removes the authenticated
+# state the helper READS. Neither is sufficient alone. See the APP-60 plan.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REAL_CLAUDE="${APPFORGE_REAL_CLAUDE_BIN:-$HOME/.local/bin/claude}"
 
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 if [ -z "${APPFORGE_AGENT_REPOS:-}" ]; then
   echo "agent-launch.sh: APPFORGE_AGENT_REPOS is not set - refusing to run without a defined repo scope" >&2
   exit 1
 fi
+
+# ------------------------------------------------------- CONTROL A (APP-60) --
+# Do not inherit the founder's git config. ~/.gitconfig configures
+# credential."https://github.com".helper = !/opt/homebrew/bin/gh auth
+# git-credential, and every agent process was reading it; an ordinary
+# read-only `git ls-remote` invoked it implicitly and got back a live founder
+# OAuth token. GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are per-process, so the
+# founder's own shell is untouched.
+#
+# This is a HARD dependency, not a best-effort one: if the replacement file is
+# missing, git would silently fall back to "no global config" and agents would
+# lose their commit identity while still looking contained. Fail loudly.
+APPFORGE_GITCONFIG="$REPO_ROOT/.gitconfig-appforge"
+if [ ! -f "$APPFORGE_GITCONFIG" ]; then
+  echo "agent-launch.sh: $APPFORGE_GITCONFIG is missing - refusing to launch an agent that would fall back to the founder's git config" >&2
+  exit 1
+fi
+export GIT_CONFIG_GLOBAL="$APPFORGE_GITCONFIG"
+export GIT_CONFIG_SYSTEM=/dev/null
+# GIT_CONFIG_NOSYSTEM is defense in depth, and it is stated as exactly that -
+# it is NOT what makes C3 pass. Measured 2026-09-28 (git 2.39.5, Apple
+# Git-154), accumulated `git config --get-all credential.helper`:
+#
+#   no containment at all      [osxkeychain, !gh auth git-credential, ]
+#                              -> fill returns username=rkamalapuram_tkinc
+#                                 and a live password. This is the gap.
+#   Control A, no NOSYSTEM     [osxkeychain, , ]
+#                              -> fill fails, "could not read Username".
+#   Control A, with NOSYSTEM   [, , ]
+#                              -> fill fails, same.
+#
+# So the empty helper in .gitconfig-appforge already resets the list. But note
+# the middle row: GIT_CONFIG_SYSTEM=/dev/null did NOT remove osxkeychain.
+# Apple's git reads /Applications/Xcode.app/.../share/git-core/gitconfig in
+# addition to the standard system path, and GIT_CONFIG_SYSTEM only redirects
+# the standard one. Without NOSYSTEM the containment is correct but rests on
+# git's reset-ordering (system read before global) rather than on the helper
+# never being read. NOSYSTEM removes that dependency.
+#
+# Deviation from the approved plan, which named only GIT_CONFIG_SYSTEM:
+# one extra env var, strictly narrowing, no behaviour an agent can observe
+# beyond a shorter helper list.
+export GIT_CONFIG_NOSYSTEM=1
+
+# ------------------------------------------------------- CONTROL B (APP-60) --
+# Give gh a private, empty config dir on EVERY path, not just the no-repo one.
+# Until this change the scoped-repo path left GH_CONFIG_DIR at the founder's
+# own ~/.config/gh, whose hosts.yml names both the personal account (repo +
+# workflow - i.e. a path to editing Actions files and therefore to the
+# release-platform pipeline, DEC-0005) and the employer account (repo on every
+# private repo that account can reach).
+#
+# Control A alone does not close this. A removes the config entry that calls
+# `gh auth git-credential`; the authenticated state it reads lives here, and
+# `gh` stays executable at its absolute path regardless of PATH hygiene.
+#
+# Prefer Paperclip's run scratch dir - it is per-run and the runtime deletes it
+# when the run ends. mktemp is the fallback for non-Paperclip invocations. A
+# fixed shared path would be wrong either way: gh writes config.yml into
+# GH_CONFIG_DIR on first use and the dir would accumulate state across runs.
+if [ -n "${PAPERCLIP_RUN_SCRATCH_DIR:-}" ] && [ -d "${PAPERCLIP_RUN_SCRATCH_DIR}" ]; then
+  GH_CONFIG_DIR="$PAPERCLIP_RUN_SCRATCH_DIR/gh"
+  mkdir -p "$GH_CONFIG_DIR"
+else
+  GH_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/appforge-gh.XXXXXX")"
+fi
+export GH_CONFIG_DIR
 
 # ---------------------------------------------------------------- NO-REPO ----
 # APPFORGE_AGENT_REPOS=none => this agent has no repo:* capability in
@@ -44,9 +125,9 @@ fi
 # accounts as logged in; with GH_CONFIG_DIR also pointed at an empty dir it
 # reports "not logged into any GitHub hosts".
 #
-# So: scrub the env tokens AND give gh a private, empty config dir. mktemp
-# per run rather than a fixed path, because gh writes config.yml into
-# GH_CONFIG_DIR on first use and a shared dir would accumulate state.
+# So: scrub the env tokens AND give gh a private, empty config dir. The dir is
+# Control B above, which now applies to every path; only the env-token scrub
+# below is specific to this branch.
 #
 # GH_CONFIG_DIR alone is NOT enough: raw git never consults it. Its
 # credential helpers are a separate path, and on this machine they hand out a
@@ -82,8 +163,9 @@ fi
 # wrapper script.
 if [ "$APPFORGE_AGENT_REPOS" = "none" ]; then
   unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
-  GH_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/appforge-gh-noauth.XXXXXX")"
-  export GH_CONFIG_DIR
+  # GH_CONFIG_DIR (Control B) is already an empty per-run dir, set above for
+  # every path. With the env tokens also scrubbed, gh has nothing at all.
+  #
   # No extraheader here: this agent gets no token, so git https to github.com
   # must fail closed rather than fall through to the keychain.
   export GIT_CONFIG_COUNT=1
