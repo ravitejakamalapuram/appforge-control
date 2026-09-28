@@ -205,23 +205,75 @@ export GH_CONFIG_DIR
 # All four need OS-level isolation (separate uid or a sandboxed HOME), not a
 # wrapper script. The uid is the only real boundary; everything this script does
 # is hygiene inside it. See docs/containment-model.md.
-if [ "$APPFORGE_AGENT_REPOS" = "none" ]; then
+
+# The credential-free environment. Used by BOTH the no-repo path below and the
+# degraded path further down, and factored into one function deliberately: a
+# degraded path that scrubbed LESS than the no-repo path would be a privilege
+# escalation, and two copies of this block would eventually drift into one.
+scrub_git_credentials() {
   unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
+
+  # Clear every numbered GIT_CONFIG_* slot before rebuilding slot 0. Lowering
+  # GIT_CONFIG_COUNT alone is NOT enough: a slot above the count is ignored by
+  # git but still sits in the environment, and on a nested launch (an agent that
+  # already holds a token invoking this script again) slot 1 still carries the
+  # outer run's live `x-access-token:ghs_...` extraheader. Caught by the APP-132
+  # degrade test, which found a real installation token surviving into what is
+  # meant to be the credential-free environment. This path promises no token at
+  # all, not merely an unread one.
+  local slot=0
+  while [ "$slot" -lt 8 ]; do
+    unset "GIT_CONFIG_KEY_$slot" "GIT_CONFIG_VALUE_$slot"
+    slot=$((slot + 1))
+  done
+
   # GH_CONFIG_DIR (Control B) is already an empty per-run dir, set above for
   # every path. With the env tokens also scrubbed, gh will not ACT as any
   # account by default. It is not stripped of credentials - see item 3 under
   # WHAT THIS DOES NOT CLOSE.
   #
-  # No extraheader here: this agent gets no token, so git https to github.com
-  # must fail closed rather than fall through to the keychain.
+  # No extraheader here: there is no token, so git https to github.com must
+  # fail closed rather than fall through to the keychain.
   export GIT_CONFIG_COUNT=1
   export GIT_CONFIG_KEY_0=credential.helper
   export GIT_CONFIG_VALUE_0=""
+}
+
+if [ "$APPFORGE_AGENT_REPOS" = "none" ]; then
+  scrub_git_credentials
+  export APPFORGE_GIT_CREDENTIAL=none
   exec "$REAL_CLAUDE" "$@"
 fi
 # -------------------------------------------------------------------------- --
 
-TOKEN_JSON="$(node "$SCRIPT_DIR/github-app-token.mjs" --repos "$APPFORGE_AGENT_REPOS")"
+# `set -e` deliberately suspended for the mint: a mint failure is a decision
+# point, not a reason to kill the run. Before APP-132 this command substitution
+# aborted the launcher outright, so one unreachable api.github.com killed the
+# agent run ~700ms in with nothing done - 25 runs and 22 stranded issues on
+# 2026-09-28 alone, none of which needed GitHub to make progress.
+MINT_STATUS=0
+TOKEN_JSON="$(node "$SCRIPT_DIR/github-app-token.mjs" --repos "$APPFORGE_AGENT_REPOS")" || MINT_STATUS=$?
+
+# 75 is EX_TEMPFAIL from github-app-token.mjs: GitHub was unreachable or asked
+# us to back off, and that script's own bounded retries are already spent.
+# Degrade to the credential-free environment - strictly LESS reach than this
+# agent's own scope, so the APP-60 containment invariant still holds - and let
+# the agent get on with whatever part of its work does not need GitHub.
+if [ "$MINT_STATUS" -eq 75 ]; then
+  echo "agent-launch.sh: GitHub App token unavailable (transient); starting agent WITHOUT git push credentials" >&2
+  scrub_git_credentials
+  export APPFORGE_GIT_CREDENTIAL=unavailable
+  exec "$REAL_CLAUDE" "$@"
+fi
+
+# Any other non-zero exit is a deterministic misconfiguration: unreadable key,
+# App not installed on a requested repo, malformed config. Those fail the same
+# way on every run, so retrying or degrading would only hide them. Stay fatal.
+if [ "$MINT_STATUS" -ne 0 ]; then
+  echo "agent-launch.sh: GitHub App token mint failed (status $MINT_STATUS) - see the error above" >&2
+  exit "$MINT_STATUS"
+fi
+
 GH_TOKEN="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).token)' "$TOKEN_JSON")"
 
 if [ -z "$GH_TOKEN" ]; then
@@ -253,5 +305,6 @@ export GIT_CONFIG_VALUE_0=""
 export GIT_CONFIG_KEY_1="http.https://github.com/.extraheader"
 export GIT_CONFIG_VALUE_1="AUTHORIZATION: basic $GIT_AUTH_B64"
 unset GIT_AUTH_B64
+export APPFORGE_GIT_CREDENTIAL=app
 
 exec "$REAL_CLAUDE" "$@"
