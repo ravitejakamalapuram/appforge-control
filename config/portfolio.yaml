@@ -556,11 +556,14 @@ noise_floor:
       - { value: 3, surface: cws_public_listing,      date: "2026-09-28" }
     disagreement_absolute: 2
     disagreement_relative: 0.40
-    interpretation: cross_surface_disagreement
+    interpretation: spread_origin_unestablished   # not cross_surface; see below
     note: |
-      Two first-party Google surfaces reported the same nominal metric one day
-      apart and disagreed by 2 users — 40% of the base. That is a MEASURED
-      instrument error bound at this scale, not an assumed one. Source:
+      Two first-party Google surfaces reported figures under the same nominal
+      name one day apart and disagreed by 2 users — 40% of the base. The
+      DISAGREEMENT is measured, not assumed, and that is what the derivation
+      consumes. Its ORIGIN is not established: calling it instrument error
+      presupposes the two figures are the same quantity, which is exactly the
+      open question (see `carries_no_weekly_vs_cumulative_signal`). Source:
       OPP-0001 open_questions.
     carries_no_weekly_vs_cumulative_signal: |
       IMPORTANT — APP-58 ruling, 2026-09-28. The 5 → 3 gap was cited, in
@@ -595,9 +598,9 @@ noise_floor:
   derivation: |
     The instrument's resolution is 1 user. To test "flat within ±10%" the band
     (N/10) must be wider than one resolvable step, so N ≥ 10 is the arithmetic
-    floor. To survive the ±2-user cross-surface disagreement observed above,
-    N/10 ≥ 2, so N ≥ 20. 30 adds margin for week-to-week variance we have not
-    yet characterised (we have no multi-week series for any product).
+    floor. To survive the ±2-user disagreement observed above — whatever its
+    origin — N/10 ≥ 2, so N ≥ 20. 30 adds margin for week-to-week variance we
+    have not yet characterised (we have no multi-week series for any product).
   min_n_for_trend_rules: 30
   confidence: medium
   revisit: "After 8 consecutive weekly exports exist for any product, replace this with the measured week-over-week standard deviation."
