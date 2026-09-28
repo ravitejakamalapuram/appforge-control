@@ -128,6 +128,64 @@ actually runs is documented here instead.
   plist's `EnvironmentVariables`, same pattern as the backup job, since
   launchd doesn't source `.envrc`.
 
+- **Quota-retry watchdog (APP-45 / DEBT-0001)** — `../../scripts/quota-retry-watchdog.mjs`
+  + `ing.paperclip.appforge-quota-watchdog.plist` (LaunchAgent
+  `ing.paperclip.appforge-quota-watchdog`, separate from Paperclip's own
+  service, the backup job, and the sync job).
+
+  Why it exists: Paperclip's adapter correctly classifies a Claude provider
+  session-limit failure as `errorCode: "provider_quota"` and the run's own
+  `error` text carries the real reset time (`"...resets 9:50am
+  (Asia/Calcutta)"`), but Paperclip's own retry scheduler
+  (`@paperclipai/server` `services/recovery/service.js`, not ours to patch —
+  see the APP-45 closing comment) ignores that and re-queues the run on a
+  short transient-failure delay instead, observed retrying 30s and 1.6s
+  after a failure against a reset ~6h away. 25 quota-failed runs burned
+  1,035K input tokens in one 24h window and returned nothing. Per the
+  founder's direction, this is deliberately NOT fixed by patching
+  Paperclip's internals (fragile, silently overwritten by every
+  `paperclipai update`, duplicates control-plane logic this repo does not
+  own) — it's fixed at a boundary this repo does own, using Paperclip's own
+  `agent pause`/`resume`/`wake` CLI, which work at board/operator level
+  (confirmed; an agent's own self-pause 403s).
+
+  What it does, every pass: reads recent heartbeat-run history
+  (`GET /api/companies/{id}/heartbeat-runs`, the same endpoint
+  `session-burn.mjs` uses — there is no `paperclipai` CLI subcommand that
+  returns run history with `errorCode`). For each newly-seen
+  `provider_quota` failure, parses the reset time out of the run's own
+  `error` text, pauses that agent immediately (so Paperclip's scheduler
+  cannot retry it early), and schedules an explicit resume+wake for
+  reset-time + a 90s clock-skew buffer. For each newly-seen genuinely
+  retryable non-quota failure (`process_lost` — the only such code observed
+  in real run history; see `scripts/lib/quota-retry-watchdog.mjs` for the
+  full reasoning), does the same pause-then-scheduled-resume, but with real
+  exponential backoff + full jitter (Marc Brooker, "Exponential Backoff And
+  Jitter", AWS Architecture Blog, 2015) instead of Paperclip's default
+  cadence. Resets each agent's backoff attempt counter to 0 on any run it
+  sees succeed.
+
+  Idempotency: a local state file
+  (`appforge-control/state/quota-retry-watchdog-state.json`, gitignored) —
+  same pattern as `sync.sh`'s `routine-sync-state.json` — tracks handled run
+  ids (pruned after 7 days), per-agent backoff attempt counts, and any
+  pending scheduled resume+wake action. Running the job every 90 seconds
+  forever never double-pauses or double-schedules the same failure.
+
+  Tests: `scripts/tests/quota-retry-watchdog.test.mjs` (pure logic — reset-
+  time parsing incl. day rollover, backoff bounds/jitter/reset-on-success,
+  idempotency) and `scripts/tests/quota-retry-watchdog-integration.test.mjs`
+  (the orchestration script against fake fetch data in `--dry-run`,
+  including a fixture-driven demonstration that `session-burn.mjs`'s
+  `quotaWaste().retriedWithinResetWindow` metric goes to zero once the
+  watchdog preempts Paperclip's scheduler — no real quota event needed to
+  prove it). `node --test` from `scripts/`.
+
+  Log: `logs/quota-retry-watchdog.log` (every detection, parse, pause,
+  resume, wake, and backoff decision — written by the script itself, one
+  line per action). `logs/quota-retry-watchdog.{out,err}.log` catch launchd-
+  level stdout/stderr (crashes, not routine activity).
+
 ## What's not here (and why)
 
 - No `cloud-init.yaml` for a VPS yet — that's the §4.3 "move-to-VPS
