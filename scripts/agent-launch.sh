@@ -178,7 +178,9 @@ export GH_CONFIG_DIR
 # whole list. Verified - the `git credential fill` above then fails with
 # "could not read Username", i.e. no credential at all.
 #
-# WHAT THIS DOES NOT CLOSE (deliberately not overclaimed - see APP-52):
+# WHAT THIS DOES NOT CLOSE (deliberately not overclaimed - see APP-60 for the
+# approved scope, and APP-71 for why an overclaimed security comment is itself
+# treated as a defect here):
 #   1. secrets/appforge-agents.private-key.pem is readable by this uid, so a
 #      no-repo agent can run scripts/github-app-token.mjs and mint its own
 #      token.
