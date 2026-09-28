@@ -80,8 +80,13 @@ notify_founder: [SEV0, SEV1]                   # severities that MUST reach the 
 # public repo appforge-kit, same token). Neither repo has server-side merge
 # gating; brain just has a check that shouts. The gate has never been bypassed,
 # but that is agent discipline, not the server. Do not describe it as enforced.
-# Enabling branch protection needs a paid plan or public repos - founder call,
-# tracked on APP-123, NOT an engineering task.
+# Company-wide the picture splits by visibility, not by repo: rulesets 403 on all
+# 5 private repos in APPFORGE_AGENT_REPOS and return 200 on all 6 public ones,
+# where json-workbench already carries an active `protected-main` ruleset
+# (deletion + non_fast_forward only - history, not merges). So it is a spend
+# question for the private repos and merely unconfigured for the public ones.
+# Either way it is a founder call, tracked on APP-123, NOT an engineering task.
+# Not verified: release-platform and InvTrack, which no agent token reaches.
 #
 # >>> REVISIT TRIGGER — DEC-0016 IS VOID IMMEDIATELY IF ANY OF THESE IS TRUE <<<
 #   1. `server.bind` is no longer `loopback`, or `server.host` is no longer
