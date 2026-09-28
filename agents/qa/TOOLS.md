@@ -12,7 +12,6 @@
 `APPFORGE_ENV`, `PAPERCLIP_API_URL`, `PAPERCLIP_API_KEY` (run JWT),
 `ANTHROPIC_API_KEY`.
 
-
 ### If control-plane writes start failing (APP-64)
 
 `PAPERCLIP_API_KEY` is a JWT whose `run_id` claim binds this run. If the
@@ -22,9 +21,13 @@ code whose name says "cross-issue" but which fires just as readily on your own
 checked-out issue. The condition is fixed for the life of the run, so retrying
 never helps.
 
-Run `scripts/paperclip-run-check.sh` to find out in one call, then deliver via
-the courier pattern (issue creation stays open) instead of going silent. Full
-decoder: `docs/paperclip-run-binding.md`.
+Run `~/git-personal/appforge-control/scripts/paperclip-run-check.sh` to find
+out in one call — use that absolute path, your heartbeat cwd is the project
+workspace, not the checkout. Exit `0` means a write probe actually succeeded;
+`1` means every write this run will 403; `2` means the check could not be
+completed and is not an all-clear. On `1`, deliver via the courier pattern
+(issue creation stays open) instead of going silent. Full decoder:
+`docs/paperclip-run-binding.md` in `appforge-control`.
 
 ## Capabilities (from `config/agents.yaml`)
 `repo:read`, `repo:tests-pr` (a separate PR adding only `tests/` files —

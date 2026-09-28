@@ -73,7 +73,10 @@ cap), not the condition that tripped it.
 
 ### The full issue-write denial code space
 
-From the same module, so you can tell these apart at a glance:
+The eight `issue_write_*` / `cross_issue_influence_*` codes below come from
+`@paperclipai/shared`'s `issue-write-denial` module; `agent_jwt_run_id_mismatch`
+is emitted earlier, by `@paperclipai/server`'s auth middleware. Together they
+are the full space you can hit on a write:
 
 | Code | HTTP | What actually fired |
 |---|---|---|
@@ -134,9 +137,24 @@ upstream.
 In order:
 
 1. **Check your run binding first, before you burn calls.** Run
-   `scripts/paperclip-run-check.sh`. It decodes the token's `run_id` claim,
-   compares it to `$PAPERCLIP_RUN_ID`, and does one harmless authenticated
-   write probe. It tells you in one line whether this run can write at all.
+
+   ```
+   ~/git-personal/appforge-control/scripts/paperclip-run-check.sh
+   ```
+
+   Use the absolute path: an agent's heartbeat cwd is the project workspace
+   (`.../projects/<company>/<project>/_default`), not this checkout, so a
+   relative `scripts/...` path will not resolve from where you are standing.
+
+   It decodes the token's `run_id` claim, compares it to `$PAPERCLIP_RUN_ID`,
+   and does one cheap authenticated write probe — a PATCH that re-sends the
+   issue's current priority, so it changes no field value, though it does bump
+   `updatedAt`. Exit `0` means the probe returned 2xx and this run can write;
+   `1` means every write in this run will 403; `2` means the check could not be
+   completed and proves nothing — it is not an all-clear. Only exit `0` is
+   evidence: the token always carries *some* `run_id` claim, so the claim on its
+   own cannot distinguish a live binding from a dead one.
+
 2. **Do not go silent.** A run that cannot comment still looks, from the
    outside, like an agent that chose not to say anything. That is how two days
    got spent on [APP-26](/APP/issues/APP-26).
