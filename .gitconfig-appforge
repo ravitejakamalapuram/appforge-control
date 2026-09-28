@@ -1,0 +1,52 @@
+# AppForge-owned git config for agent runs.
+#
+# scripts/agent-launch.sh points GIT_CONFIG_GLOBAL at this file (and
+# GIT_CONFIG_SYSTEM at /dev/null), so an agent process reads THIS instead of
+# the founder's ~/.gitconfig. Control A of board approval 2569ea51 (APP-60).
+#
+# Why it exists: ~/.gitconfig routes github.com credentials to
+# `!/opt/homebrew/bin/gh auth git-credential`, which hands back a live OAuth
+# user token for whichever founder account gh has active - the personal one
+# (repo + workflow on every repo the founder owns) or the employer one
+# (repo on every private repo that employer account can reach). Every agent
+# process inherited that, and a plain read-only `git ls-remote` was enough to
+# invoke it implicitly. See the APP-60 plan document for the evidence table.
+#
+# ------------------------------------------------------------------------
+# DO NOT ADD A CREDENTIAL HELPER TO THIS FILE.
+# ------------------------------------------------------------------------
+# The single property this file has to preserve is that github.com has no
+# helper. Raw git in an agent run authenticates only via the explicit
+# Authorization header agent-launch.sh builds from that run's scoped, hour-
+# lived App installation token, and fails closed when there is no token.
+# A helper here would restore exactly the path the approval closed.
+#
+# What is deliberately NOT carried over from ~/.gitconfig:
+#   - the three `includeIf gitdir:` stanzas, which is how the founder's
+#     personal and employer identities were being selected by directory
+#   - `safe.directory` for the InvTrack runner checkout (agents are forbidden
+#     from touching InvTrack at all - AGENTS.md)
+#   - the gitlab.com ssh `insteadOf` rewrite (no AppForge remote is on gitlab)
+#
+# SSH is NOT closed here, on purpose. Closing the HTTPS credential and
+# rewriting SSH onto that now-dead path in one change would leave agents with
+# no way to push decision records to appforge-brain. APP-48 Rec 1C lands with
+# the per-run appforge-brain installation token, not before.
+
+[user]
+	name = appforge-agents[bot]
+	email = 334632768+appforge-agents[bot]@users.noreply.github.com
+
+[credential]
+	helper =
+[credential "https://github.com"]
+	helper =
+[credential "https://gist.github.com"]
+	helper =
+
+[init]
+	defaultBranch = main
+[pull]
+	rebase = false
+[core]
+	ignorecase = false
