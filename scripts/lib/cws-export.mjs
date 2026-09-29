@@ -19,6 +19,7 @@
 //    not." This file therefore derives nothing from the magnitude or
 //    direction of any value.
 
+import { parseCsv } from './csv.mjs';
 import { sha256, utcCalendarDate } from './metrics-manifest.mjs';
 
 export const SOURCE = 'cws_dashboard_export';
@@ -51,30 +52,9 @@ export const NOT_IN_DASHBOARD_EXPORT = Object.freeze([
 
 const DATE_HEADERS = ['date', 'week', 'week of', 'day', 'as of'];
 
-/** Minimal RFC4180-ish CSV split: handles quoted fields containing commas. */
-export function parseCsv(text) {
-  const rows = [];
-  let row = [];
-  let field = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
-      } else field += ch;
-      continue;
-    }
-    if (ch === '"') { inQuotes = true; continue; }
-    if (ch === ',') { row.push(field); field = ''; continue; }
-    if (ch === '\r') continue;
-    if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; continue; }
-    field += ch;
-  }
-  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
-  return rows.filter((r) => !(r.length === 1 && r[0].trim() === ''));
-}
+// `parseCsv` moved to ./csv.mjs in APP-210 (Play needs it too). Re-exported
+// here so existing importers and tests keep working.
+export { parseCsv };
 
 const norm = (h) => h.trim().toLowerCase().replace(/\s+/g, ' ');
 
