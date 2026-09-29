@@ -18,6 +18,15 @@
 # (§7.2: budget < 20% remaining ⇒ drop one tier) already covers cost control
 # within that fixed tier for routine, low-stakes runs.
 
+# Capability strings (`capabilities:` on each agent below) are DEFINED in
+# docs/capabilities.md, and nowhere else. Nothing in this repo reads or
+# validates them — they are read by humans and by agents deciding how to route
+# work, which is exactly why an undefined one is dangerous rather than untidy.
+# APP-194: `browser:e2e` was granted here and defined nowhere, was therefore
+# read as "QA can drive a browser", and APP-54 was routed to QA on that reading
+# for a Chrome Web Store dashboard export it could never have done. Grant and
+# definition change in the same PR, always.
+
 schema: appforge/agents@1
 
 # Run turn ceiling (APP-29). Previously this lived only in each agent's
@@ -138,6 +147,16 @@ agents:
       routines: []
       wakes: [handoff_assignment, "webhook:pr_ready"]
       max_concurrent: 1   # holds a browser e2e session and a repo checkout - two concurrent runs would collide on the same workspace
+    # VERIFIED (APP-194, 2026-09-29): `browser:e2e` is real and was NOT removed.
+    # It was filed as a phantom grant on the strength of a search scoped to this
+    # repo, which is the wrong place to look — test tooling lives in the kit.
+    # `@appforge/e2e` (appforge-kit `packages/e2e`, commit c128399) is merged,
+    # Playwright 1.63.0 and its Chromium are installed, the package's own suite
+    # runs 10/10 green against a real browser, and `appforge test --e2e` returns
+    # ok:true end to end. What `browser:e2e` cannot do is touch an authenticated
+    # session: it launches an empty throwaway profile with no cookies and no
+    # relationship to the founder's Brave. That boundary, not the grant, is what
+    # mis-routed APP-54. See docs/capabilities.md.
     capabilities: [repo:read, repo:tests-pr, browser:e2e]
     reports_to: cto
 
