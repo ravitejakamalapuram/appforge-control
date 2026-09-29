@@ -37,6 +37,68 @@ completed and is not an all-clear. On `1`, deliver via the courier pattern
 (issue creation stays open) instead of going silent. Full decoder:
 `docs/paperclip-run-binding.md` in `appforge-control`.
 
+## Working with repos (APP-72)
+
+Every agent shares **one working copy** per repo at `~/git-personal/<repo>`.
+It is not yours. APP-48 §2 recorded three collisions in a single run: a commit
+landing on another agent's branch, a branch cut from another agent's HEAD, and
+a `git commit --amend` rewriting a third agent's commit — recovered only
+because the tree happened to be byte-identical that time.
+
+- **Work in a run-scoped worktree, never in the shared checkout.**
+
+  ```bash
+  git -C ~/git-personal/<repo> worktree add --detach \
+    "$PAPERCLIP_RUN_SCRATCH_DIR/<repo>-<issue>" origin/<base>
+  cd "$PAPERCLIP_RUN_SCRATCH_DIR/<repo>-<issue>" && git switch -c <branch>
+  ```
+
+  `--detach` is what leaves the base ref free for other runs. Scratch dir
+  only — never a persistent worktree root. `~/git-personal/.appforge-wt/` was
+  one, and it leaked a worktree holding uncommitted work across runs.
+
+- **Never `git checkout` or `git switch` in `~/git-personal/<repo>`.** Leave
+  the shared checkout on whatever branch you found it on, even when that branch
+  looks stale or abandoned — it may be another agent's live run. Reading files
+  there is unsafe for the same reason: it can be on any branch at any moment.
+  Read from your own worktree, at a ref you chose.
+
+- **Branch from `origin/<base>`, not from local `HEAD`.** The shared checkout's
+  HEAD is whatever the last agent left there, which is how APP-48's
+  branch-cut-from-a-stranger's-HEAD happened.
+
+- **Verify branch state against the remote, not local refs:**
+  `git ls-remote --heads origin`. Concurrent runs leave local `origin/*` refs
+  stale, and that has already caused a pushed branch to be reported as
+  unpushed.
+
+- **Tear down explicitly at the end of the run:**
+
+  ```bash
+  git -C ~/git-personal/<repo> worktree remove --force \
+    "$PAPERCLIP_RUN_SCRATCH_DIR/<repo>-<issue>"
+  ```
+
+  Paperclip deletes `$PAPERCLIP_RUN_SCRATCH_DIR` when the run ends, but nothing
+  deletes the `.git/worktrees/` metadata pointing into it.
+  `scripts/agent-launch.sh` prunes leftovers on the next launch as a backstop —
+  that is a net, not a substitute for the teardown.
+
+- **A fresh worktree has no `node_modules`.** In `appforge-brain` that makes
+  `generate-index`, `validate:schema` and `npm test` fail with
+  `ERR_MODULE_NOT_FOUND` on `js-yaml` *before they read any data* — a missing
+  dependency, not a validation failure. Symlink the main checkout's tree first
+  (`ln -s ~/git-personal/appforge-brain/node_modules node_modules`), then
+  re-run. Delete that symlink before committing: `.gitignore` says
+  `node_modules/`, which is directory-only, so the symlink shows up as
+  untracked and `git add -A` will stage it. Also `validate:append-only` takes
+  **two refs**, not a range: `npm run validate:append-only main HEAD`.
+
+- **Never delete another task's uncommitted work.** If you find a worktree or a
+  dirty tree you did not create, leave it alone and raise it on your issue for
+  its owner to reclaim or discard. Exercising that judgement is the point of
+  this section, not an exception to it.
+
 ## Capabilities (from `config/agents.yaml`)
 `paperclip:company`, `metrics:read`, `brain:pr`.
 

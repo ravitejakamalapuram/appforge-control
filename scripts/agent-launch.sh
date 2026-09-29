@@ -122,6 +122,28 @@ else
 fi
 export GH_CONFIG_DIR
 
+# --------------------------------------------------- WORKTREE PRUNE (APP-72) --
+# Backstop for the run-scratch worktree convention (APP-72, from APP-48 §2).
+# Agents work in `git worktree add --detach "$PAPERCLIP_RUN_SCRATCH_DIR/..."`
+# instead of switching branches in the shared ~/git-personal/<repo> checkout, and
+# remove that worktree at end of run. Paperclip deletes the scratch directory but
+# not the .git/worktrees/ entry pointing into it, so a run that dies before its
+# own teardown leaks one permanently. Pruning here catches those on the next
+# launch.
+#
+# Safe to run while other agents are mid-run: `git worktree prune` removes only
+# entries whose directory is already gone. Never allowed to block a launch - it
+# is a net under the per-run teardown, not a replacement for it, so every
+# failure is swallowed.
+#
+# Deliberately placed AFTER Controls A and B: it is the first git invocation
+# this wrapper makes, and it runs under the contained config like every other
+# one. It is local-only (no network, no credential helper), but the invariant is
+# worth more than the exception. It is also before the NO-REPO exec, so an agent
+# with no repo scope still gets the launch-time prune - the script itself no-ops
+# on the literal `none`.
+"$SCRIPT_DIR/prune-agent-worktrees.sh" "$APPFORGE_AGENT_REPOS" || true
+
 # ---------------------------------------------------------------- NO-REPO ----
 # APPFORGE_AGENT_REPOS=none => this agent has no repo:* capability in
 # config/agents.yaml (today: analyst, whose agents/analyst/TOOLS.md deny list
