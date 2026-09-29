@@ -223,6 +223,41 @@ $ echo $?
 1
 ```
 
+### What has actually landed
+
+One real import is in `data/metrics/manifest.jsonl`: `cws_public_listing` /
+`json-workbench`, `as_of` 2026-09-29, checksum
+`04c8d1ff…36422e5`, giving `cws_rating_average = 5` and `cws_rating_count = 1`.
+
+It arrived as an **attested extract**, not as page bytes. This runtime has no
+automation channel to a browser (QA established that on APP-54: no Playwright,
+npm egress 403, no browser tool, Brave running without a debugging port), so
+the agent that can fetch a listing is not the agent that can parse one. The
+extract therefore carries the **upstream** sha256 — the hash of the bytes QA
+actually received — together with who captured it and where the raw artifact
+lives, and sets `raw_artifact_present: false` so the manifest never implies
+this repo can reproduce those bytes. Reconstructing a page locally and hashing
+that would have put a checksum in the manifest attesting to a file nobody ever
+fetched.
+
+Staleness is demonstrated against that real import, not only against a
+fixture:
+
+```
+$ node scripts/metrics-status.mjs --now 2026-10-30T00:00:00Z
+  STALE  cws_rating_average  (no value served)  age 31d / max 30d
+         newest import ... is as_of 2026-09-29, 31d old, past its
+         max_age_days of 30 — value withheld
+  insufficient_data: ..., cws_rating_average, cws_rating_count, ...
+$ echo $?
+1
+```
+
+Nothing was re-imported; only the clock moved, and the value stopped being
+served.
+
+---
+
 ---
 
 ## 7. Two definitions not to get wrong
@@ -263,6 +298,7 @@ rising one.
 | `scripts/lib/metrics-manifest.mjs` | manifest records, checksums, derived `lag_days` |
 | `scripts/lib/metrics-freshness.mjs` | the freshness contract; alias bans; derived-metric resolution |
 | `scripts/lib/cws-export.mjs` | CWS CSV parser; verbatim header capture |
+| `scripts/lib/cws-listing.mjs` | public-listing reader (rating fields, APP-163); attested-extract path |
 | `scripts/metrics-import.mjs` | import CLI |
 | `scripts/metrics-status.mjs` | `appforge metrics` reader; exits 1 on stale |
 | `scripts/tests/fixtures/` | **synthetic** fixtures — not real exports |
