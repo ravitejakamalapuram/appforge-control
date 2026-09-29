@@ -1,6 +1,14 @@
 #!/bin/bash
-# Installs the agent runtime launcher into a prefix OUTSIDE every git working
-# tree (default ~/.appforge), from a NAMED, PUBLISHED ref.
+# Installs the agent runtime launcher AND the quota-retry watchdog into a prefix
+# OUTSIDE every git working tree (default ~/.appforge), from a NAMED, PUBLISHED
+# ref.
+#
+# The watchdog was added in APP-164 for the same reason as the launcher: its
+# LaunchAgent named scripts/quota-retry-watchdog.mjs in the shared development
+# checkout, so the daemon executed whatever branch was checked out there. On
+# 2026-09-29 that was an unmerged feature branch. One deploy step, one manifest,
+# one drift check for both runtimes - see infra/macos/*quota-watchdog.plist for
+# the three runtime paths that plist must keep pinned, and why.
 #
 # Why this exists (APP-137): the live launcher used to be served straight from
 # scripts/ in the shared development checkout. Every agent on this box execs it,
@@ -41,6 +49,16 @@
 #   github-app-token.mjs  CONTROL_ROOT=<minter dir>/..  -> $PREFIX/config/github-apps.yaml
 #                                                          $PREFIX/secrets/*.pem
 #   node                  upward from the minter        -> $PREFIX/bin/node_modules
+#   quota-retry-watchdog  $SCRIPT_DIR/lib/              -> $PREFIX/bin/lib/*.mjs
+#
+# The watchdog also derives REPO_ROOT=$SCRIPT_DIR/.. and hangs THREE runtime
+# paths off it: its state file, its log, and CLAUDE_CONFIG_DIR - the directory
+# the bundled `paperclipai` CLI authenticates from. Installing it here therefore
+# repoints all three at $PREFIX unless the caller pins them. The plist pins them
+# back at the checkout on purpose; do not "fix" that by letting them drift to
+# $PREFIX, which has no credential dir and no state history. An empty state file
+# is not benign: it re-handles every run still in the lookback window, which
+# means duplicate pauses, resumes and wakes.
 #
 # Mirroring the layout is what lets every installed file stay BYTE-IDENTICAL to
 # the reviewed ref with no edits. A flat directory would require patching the
@@ -270,6 +288,9 @@ VERSIONED=(
   "scripts/github-app-token.mjs:bin/github-app-token.mjs:0555"
   "scripts/prune-agent-worktrees.sh:bin/prune-agent-worktrees.sh:0555"
   "scripts/lib/github-app.mjs:bin/lib/github-app.mjs:0444"
+  "scripts/quota-retry-watchdog.mjs:bin/quota-retry-watchdog.mjs:0555"
+  "scripts/lib/quota-retry-watchdog.mjs:bin/lib/quota-retry-watchdog.mjs:0444"
+  "scripts/lib/quota-pause-collateral.mjs:bin/lib/quota-pause-collateral.mjs:0444"
   "scripts/package.json:bin/package.json:0444"
   "scripts/package-lock.json:bin/package-lock.json:0444"
   ".gitconfig-appforge:.gitconfig-appforge:0444"
@@ -323,6 +344,18 @@ bash -n "$STAGE/bin/agent-launch.sh"           || die "staged agent-launch.sh do
 bash -n "$STAGE/bin/prune-agent-worktrees.sh"  || die "staged prune-agent-worktrees.sh does not parse"
 node --check "$STAGE/bin/github-app-token.mjs" || die "staged github-app-token.mjs does not parse"
 node --check "$STAGE/bin/lib/github-app.mjs"   || die "staged lib/github-app.mjs does not parse"
+node --check "$STAGE/bin/quota-retry-watchdog.mjs"     || die "staged quota-retry-watchdog.mjs does not parse"
+node --check "$STAGE/bin/lib/quota-retry-watchdog.mjs" || die "staged lib/quota-retry-watchdog.mjs does not parse"
+node --check "$STAGE/bin/lib/quota-pause-collateral.mjs" || die "staged lib/quota-pause-collateral.mjs does not parse"
+# The watchdog resolves its two libs relative to its own directory. Importing it
+# proves bin/lib/ landed with it, which a parse check alone does not: a missing
+# sibling only fails at import time, i.e. on the live 90s tick after the swap.
+# This does not start the daemon: the watchdog only acts under its
+# `import.meta.url === file://$process.argv[1]` entrypoint guard, and under
+# `node -e` argv[1] is not the module path, so importing it is inert. Its
+# top-level scope is const declarations only.
+( cd "$STAGE/bin" && node -e "import('./quota-retry-watchdog.mjs').then(()=>process.exit(0)).catch((e)=>{console.error(e.message);process.exit(1)})" ) \
+  || die "staged quota-retry-watchdog.mjs cannot import its own libs from bin/lib/ - the layout invariant is broken"
 # Proves node's upward resolution from the minter's directory finds the staged
 # node_modules - the invariant that breaks if bin/ is ever flattened or moved.
 for dep in $RUNTIME_DEPS; do
@@ -408,3 +441,8 @@ say "manifest: $PREFIX/RELEASE"
 say "rollback: $ROLLBACK"
 say "verify:   node $REPO/scripts/detect-launcher-drift.mjs"
 say "agents pick this up on their next launch; nothing restarts a run in flight."
+# The watchdog is the exception: it is a LaunchAgent, not exec'd per agent run,
+# so it keeps running its previously-resolved program path until launchd reloads.
+say "watchdog: reload the LaunchAgent to pick up this deploy -"
+say "  launchctl bootout  gui/\$(id -u)/ing.paperclip.appforge-quota-watchdog"
+say "  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/ing.paperclip.appforge-quota-watchdog.plist"
