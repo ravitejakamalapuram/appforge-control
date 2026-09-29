@@ -8,3 +8,8 @@ node_modules/
 # age keypair for backup encryption (private key). Never commit.
 secrets/
 state/
+
+# Worktrees symlink this to the shared checkout so tests can resolve `yaml`
+# (see infra/macos/digest-gate.sh NODE_PATH). It is a symlink to an ABSOLUTE
+# local path, so the `node_modules/` pattern above does not catch it.
+scripts/node_modules
