@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { runImport } from '../metrics-import.mjs';
 import { readManifest } from '../lib/metrics-manifest.mjs';
 import { buildStatus } from '../metrics-status.mjs';
-import { evaluateRule, loadContract, DECIDABILITY, STATUS } from '../lib/metrics-freshness.mjs';
+import { evaluateRule, loadContract, assertNotAliased, DECIDABILITY, STATUS } from '../lib/metrics-freshness.mjs';
 
 import { fileURLToPath } from 'node:url';
 
@@ -177,4 +177,51 @@ test('min_history_weeks blocks a value with too little export history', () => {
   assert.equal(r.decidability, DECIDABILITY.UNDECIDABLE);
   assert.match(r.blocking_inputs.map((b) => b.reason).join(' '), /min_history_weeks=12/);
   assert.match(r.blocking_inputs.map((b) => b.reason).join(' '), /1 week\(s\) of export history/);
+});
+
+// ---- APP-157: the GA4 path is decided but unprovisioned ----
+
+test('--source ga4 is refused by name, with the reason, before any file is read', () => {
+  // The point is not that it fails — an unknown source already failed. The
+  // point is that the failure explains WHY, so nobody re-derives APP-157.
+  assert.throws(
+    () => runImport({ source: 'ga4' }),
+    (e) => {
+      assert.match(e.message, /Opt in to Google Analytics/);
+      assert.match(e.message, /service account can NEVER work/);
+      assert.match(e.message, /expires in 7 days/, 'the Testing-status token trap must stay in the message');
+      return true;
+    },
+  );
+  // No --item, no --file: the refusal must not be reachable only after a read.
+});
+
+test('the GA4 instruments are banned from aliasing their dashboard counterparts', () => {
+  const contract = loadContract(PORTFOLIO);
+  for (const [a, b] of [
+    ['ga4_install_events', 'cws_installs'],
+    ['ga4_listing_page_views', 'cws_listing_page_views'],
+  ]) {
+    assert.throws(() => assertNotAliased(contract, a, b), /forbidden alias/, `${a} -> ${b}`);
+    assert.throws(() => assertNotAliased(contract, b, a), /forbidden alias/, `${b} -> ${a}`);
+  }
+  // Crossing the two families is what would corrupt store_listing_conversion.
+  assert.equal(contract.metrics.store_listing_conversion.inputs.join(','),
+    'cws_installs,cws_listing_page_views',
+    'EXP-0001 primary metric must stay on the dashboard family alone');
+});
+
+test('a declared-but-unprovisioned GA4 metric reads `missing`, never 0', () => {
+  const { dir, file } = stage();
+  runImport({ source: 'cws', item: 'json-workbench', file, data_root: dir,
+    exported_at: '2026-09-28T10:00:00Z' });
+
+  const status = buildStatus({
+    portfolioPath: PORTFOLIO, dataRoot: dir, itemId: 'json-workbench',
+    now: new Date('2026-09-29T00:00:00Z'),
+  });
+  const row = status.rows.find((r) => r.metric === 'ga4_install_events');
+  assert.ok(row, 'ga4_install_events must be visible in status, not silently absent');
+  assert.equal(row.status, STATUS.MISSING);
+  assert.equal(row.value, null);
 });
