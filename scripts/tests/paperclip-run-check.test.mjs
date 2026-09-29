@@ -51,9 +51,11 @@ const priorEvent = () => event({ id: 'e0', createdAt: WATERMARK });
 
 /**
  * Starts a stub control plane.
- * @param {{patchStatus?: number, activity: Array<Array<object>>}} opts
+ * @param {{patchStatus?: number, activity: Array<Array<object>|{status: number, body?: unknown}>}} opts
  *   `activity` is answered in order: [0] is the pre-probe watermark read,
- *   [1] the post-probe read-back.
+ *   [1] the post-probe read-back. An entry may be a plain row array (answered
+ *   200) or `{status, body}` to make that specific call fail - which is what
+ *   separates "the log is empty" from "the fetch failed" (APP-169).
  */
 async function withStub(opts, body) {
   const activity = [...opts.activity];
@@ -64,9 +66,10 @@ async function withStub(opts, body) {
       res.end(JSON.stringify(payload));
     };
     if (req.url.includes('/activity')) {
-      const rows = activity[Math.min(activityCalls, activity.length - 1)];
+      const entry = activity[Math.min(activityCalls, activity.length - 1)];
       activityCalls += 1;
-      return json(200, rows);
+      if (Array.isArray(entry)) return json(200, entry);
+      return json(entry.status, entry.body ?? { code: 'activity_unavailable' });
     }
     if (req.method === 'PATCH') {
       const status = opts.patchStatus ?? 200;
@@ -124,6 +127,11 @@ test('responsibleUserId: local-board alone is not laundering', async () => {
   // The regression this guards: `responsibleUserId` is the human whose
   // authority the agent rides and reads `local-board` on every correct agent
   // write, so testing it would fail every healthy run.
+  //
+  // The empty first activity response here is a genuinely EMPTY LOG answered
+  // 200, which is still a legitimate exit 0. The paired cases below cover the
+  // other way an empty watermark used to arise - a failed fetch - which must
+  // NOT reach exit 0.
   const { code, out } = await withStub(
     { activity: [[], [event({ responsibleUserId: 'local-board' })]] },
     (url) => run(url),
@@ -167,4 +175,68 @@ test('exit 1 on a 403 probe still wins over any attribution check', async () => 
   );
   assert.equal(code, 1, out);
   assert.match(out, /CANNOT write to any issue/);
+});
+
+// --- APP-169: a failed watermark fetch must not be read as "no constraint" ---
+//
+// Before the fix, both activity reads were piped straight into a reader with
+// their HTTP status discarded, so a failed watermark GET produced an empty
+// watermark, and an empty watermark disabled the freshness filter entirely.
+// The check then asserted over the issue's whole history in both directions.
+
+test('APP-169 case A: a failed watermark fetch must not mask a laundered write', async () => {
+  // Read-back holds a STALE correctly-attributed row (e.g. from earlier in the
+  // same heartbeat) alongside the fresh laundered one. Unconstrained, the stale
+  // row satisfies the "this agent, this run" match and the check exits 0 - a
+  // false all-clear on the exact condition it exists to detect.
+  const staleMine = event({ id: 'e0', createdAt: WATERMARK });
+  const launderedFresh = event({
+    id: 'e2', actorType: 'user', actorId: 'local-board', runId: null, createdAt: AFTER,
+  });
+  const { code, out } = await withStub(
+    { activity: [{ status: 500 }, [launderedFresh, staleMine]] },
+    (url) => run(url),
+  );
+  assert.equal(code, 2, out);
+  assert.match(out, /UNVERIFIED/);
+  assert.match(out, /could not read the activity log/);
+  assert.doesNotMatch(out, /recorded as THIS AGENT/);
+});
+
+test('APP-169 case B: a failed watermark fetch must not invent a laundering report', async () => {
+  // Read-back holds no fresh row at all, just a months-old board-authored one.
+  // 43% of sampled company issues carry such a row, so unconstrained this turns
+  // a single transient GET failure into a phantom containment incident.
+  const oldBoard = event({
+    id: 'e9', actorType: 'user', actorId: 'local-board', runId: null,
+    createdAt: '2026-09-01T00:00:00.000Z',
+  });
+  const { code, out } = await withStub(
+    { activity: [{ status: 500 }, [oldBoard]] },
+    (url) => run(url),
+  );
+  assert.equal(code, 2, out);
+  assert.match(out, /UNVERIFIED/);
+  assert.doesNotMatch(out, /LAUNDERED/);
+});
+
+test('APP-169: a 200 activity response that is not an array is UNVERIFIED', async () => {
+  const { code, out } = await withStub(
+    { activity: [{ status: 200, body: { code: 'not_an_array' } }, [event()]] },
+    (url) => run(url),
+  );
+  assert.equal(code, 2, out);
+  assert.match(out, /not a\n?.*JSON array|not a[\s\S]{0,40}JSON array/);
+});
+
+test('APP-169: a failed read-back fetch is UNVERIFIED, not an all-clear', async () => {
+  // The watermark establishes fine; it is the post-probe read that fails. The
+  // write landed, so this cannot be reported as a clean run either way.
+  const { code, out } = await withStub(
+    { activity: [[priorEvent()], { status: 503 }] },
+    (url) => run(url),
+  );
+  assert.equal(code, 2, out);
+  assert.match(out, /could not re-read the activity log/);
+  assert.doesNotMatch(out, /recorded as THIS AGENT|LAUNDERED/);
 });

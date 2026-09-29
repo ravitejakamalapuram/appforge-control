@@ -29,9 +29,10 @@
 #      this agent and this run - write normally
 #   1  run is NOT attributable - every write will 403, use the courier pattern
 #   2  UNVERIFIED - the check could not be completed (missing env, no issue to
-#      probe, decoder unavailable, probe inconclusive, or the probe succeeded but
-#      its attribution could not be read back). This is not an all-clear: treat
-#      writes as unsafe until a probe returns 2xx AND reads back as this agent.
+#      probe, decoder unavailable, probe inconclusive, the freshness watermark
+#      could not be established, or the probe succeeded but its attribution could
+#      not be read back). This is not an all-clear: treat writes as unsafe until a
+#      probe returns 2xx AND reads back as this agent.
 #   3  LAUNDERED - the write probe SUCCEEDED but was recorded as the board
 #      (`actorType: user` / `actorId: local-board`) rather than as this agent.
 #      Do not write. Every comment would land as a founder comment: it fires
@@ -173,13 +174,63 @@ fi
 # request - so there is nothing in it to assert on. The issue activity log is
 # where a write's actor is recorded, and it is a shared append-only stream, so
 # note the newest event's timestamp first and only consider events after it.
+#
+# `limit` is sent for the day the route honours it, but the control plane
+# currently IGNORES it and returns the entire log, so do not read the surrounding
+# code as if the window were bounded at 25 rows (APP-169).
 ACTIVITY_URL="$BASE/api/issues/$ISSUE_ID/activity?limit=25"
-WATERMARK="$(auth_header | curl -sS -H @- "$ACTIVITY_URL" 2>/dev/null \
-  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{
-      const a=JSON.parse(s); const rows=Array.isArray(a)?a:[];
+
+ACTIVITY_TMP="$(mktemp "${TMPDIR:-/tmp}/paperclip-run-check.XXXXXX" 2>/dev/null)"
+if [ -z "$ACTIVITY_TMP" ]; then
+  fail "could not create a temp file to hold the activity read-back."
+  fail "Run binding is UNVERIFIED - treat writes as unsafe."
+  exit 2
+fi
+trap 'rm -f "$ACTIVITY_TMP"' EXIT
+
+# Body to $ACTIVITY_TMP, HTTP status to $ACTIVITY_STATUS. Keeping the status in a
+# variable set by the CALLER (not returned through a pipe) is the whole point:
+# piping curl straight into a reader throws the status away, and "the fetch
+# failed" then becomes indistinguishable from "the log is empty". A transport
+# failure leaves the status empty, which is distinct from any real HTTP code.
+ACTIVITY_STATUS=""
+fetch_activity() {
+  ACTIVITY_STATUS="$(auth_header \
+    | curl -sS -o "$ACTIVITY_TMP" -w '%{http_code}' -H @- "$ACTIVITY_URL" 2>/dev/null)"
+  case "$ACTIVITY_STATUS" in 2*) return 0 ;; esac
+  return 1
+}
+
+# The watermark is the ONLY thing making the attribution check an assertion about
+# THIS write rather than about any write in the issue's history, so it is the last
+# input that may fail open. An unestablished watermark is UNVERIFIED (exit 2), not
+# "no constraint": with no constraint, a stale correctly-attributed row reads as a
+# clean bill of health while an actual laundered write sits next to it, and a
+# months-old board-authored row reads as a laundering incident that never happened.
+if ! fetch_activity; then
+  fail "could not read the activity log for $ISSUE_ID (HTTP ${ACTIVITY_STATUS:-no response})."
+  fail "That log is where the freshness watermark comes from, and without it the"
+  fail "attribution check cannot tell this run's write from any historical one."
+  fail "Run binding is UNVERIFIED - treat writes as unsafe until a probe returns 2xx"
+  fail "AND reads back as this agent."
+  exit 2
+fi
+
+# Exit 4 = fetched, but the payload is not a JSON array. An EMPTY array is fine
+# and yields an empty watermark, which now means what it says - the log had no
+# events - because a failed fetch can no longer reach this point.
+WATERMARK="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+      let rows; try { rows = JSON.parse(s); } catch { process.exit(4); }
+      if (!Array.isArray(rows)) process.exit(4);
       let m=""; for (const r of rows) if (r && r.createdAt && String(r.createdAt) > m) m=String(r.createdAt);
       process.stdout.write(m);
-    }catch{}})' 2>/dev/null)"
+    })' < "$ACTIVITY_TMP" 2>/dev/null)"
+if [ $? -ne 0 ]; then
+  fail "the activity log for $ISSUE_ID returned HTTP $ACTIVITY_STATUS but was not a"
+  fail "JSON array, so no freshness watermark could be established."
+  fail "Run binding is UNVERIFIED - treat writes as unsafe."
+  exit 2
+fi
 
 BODY="$(node -e 'process.stdout.write(JSON.stringify({priority:process.argv[1]}))' "$CUR_PRIORITY")"
 PROBE="$(auth_header | curl -sS -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/issues/$ISSUE_ID" \
@@ -197,7 +248,11 @@ PROBE="$(auth_header | curl -sS -o /dev/null -w '%{http_code}' -X PATCH "$BASE/a
 # token's own `responsible_user_id` claim). It is NOT the laundering signal and
 # must not be tested. The signal is `actorType` / `actorId` / `runId`.
 verify_attribution() {
-  auth_header | curl -sS -H @- "$ACTIVITY_URL" 2>/dev/null | node -e '
+  if ! fetch_activity; then
+    echo "could not re-read the activity log (HTTP ${ACTIVITY_STATUS:-no response})" >&2
+    return 2
+  fi
+  node -e '
     const [issueId, wantAgent, wantRun, watermark] = process.argv.slice(1);
     let s = "";
     process.stdin.on("data", d => s += d).on("end", () => {
@@ -206,9 +261,14 @@ verify_attribution() {
       if (!Array.isArray(rows)) process.exit(2);
       // ISO-8601 with a fixed Z offset sorts lexicographically, so a string
       // compare is a correct "after the watermark" test and needs no Date parse.
+      // No `!watermark ||` escape hatch. An empty watermark now means the log
+      // was genuinely empty (a failed fetch exits 2 before we get here), and
+      // every real ISO timestamp sorts after "" - so the comparison is correct
+      // in that case too, while a row carrying no createdAt stays excluded
+      // rather than being assumed fresh.
       const fresh = rows.filter(r =>
         r && r.action === "issue.updated" && r.entityId === issueId &&
-        (!watermark || String(r.createdAt || "") > watermark));
+        String(r.createdAt || "") > watermark);
       if (!fresh.length) {
         console.error("no issue.updated event recorded after the probe");
         process.exit(2);
@@ -229,7 +289,7 @@ verify_attribution() {
         fresh.map(r => r.actorType + ":" + r.actorId).join(", "));
       process.exit(2);
     });
-  ' "$ISSUE_ID" "$CLAIM_AGENT_ID" "$CLAIM_RUN_ID" "$WATERMARK"
+  ' "$ISSUE_ID" "$CLAIM_AGENT_ID" "$CLAIM_RUN_ID" "$WATERMARK" < "$ACTIVITY_TMP"
 }
 
 case "$PROBE" in
