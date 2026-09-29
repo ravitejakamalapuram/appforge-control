@@ -29,6 +29,18 @@
 
 set -uo pipefail
 
+# --dry-run does everything except the POST that wakes Analyst: fetch, worktree,
+# node_modules link, the digest, and the exit-code decision, reporting which
+# branch it WOULD have taken. This exists because the alternative way to verify
+# this script is to fire it, which spends a model call against the smallest
+# budget in the company — so the honest check would have been skipped instead.
+DRY_RUN=0
+case "${1:-}" in
+  --dry-run) DRY_RUN=1 ;;
+  "") ;;
+  *) echo "usage: digest-gate.sh [--dry-run]" >&2; exit 2 ;;
+esac
+
 ROUTINE_ID="91419456-6fa8-4521-bafe-c99eab44f2f1"
 TRIGGER_ID="d2127cac-e6cb-46be-aa9e-7c94a04c22de"
 
@@ -72,9 +84,27 @@ trap cleanup EXIT
 git -C "$REPO" fetch origin --quiet || { log "FAIL git fetch"; notify "gate did not run: git fetch failed"; exit 1; }
 git -C "$REPO" worktree add --detach "$WT" origin/main --quiet || { log "FAIL worktree add"; notify "gate did not run: worktree add failed"; exit 1; }
 
-# metrics-digest needs `yaml`; the worktree has no node_modules of its own, so
-# point Node at the shared checkout's already-installed one.
-export NODE_PATH="$REPO/scripts/node_modules"
+# metrics-digest needs `yaml`, and the fresh worktree has no node_modules of its
+# own. NODE_PATH does NOT solve this: it is a CommonJS-only mechanism and ESM
+# `import` ignores it outright, so the earlier NODE_PATH version of this script
+# failed with ERR_MODULE_NOT_FOUND on every run — exit 1, "the check did not
+# run", every single day. That is the worst available failure: it never fires
+# the routine AND it pages the founder daily.
+#
+# ESM resolution walks parent directories looking for a real `node_modules`, so
+# linking the shared checkout's installed tree into the same relative position
+# is what actually works. Symlink, not a copy: `npm ci` here would add a network
+# dependency to a gate whose whole job is to be cheap and quiet.
+if [ ! -d "$REPO/scripts/node_modules" ]; then
+  log "FAIL $REPO/scripts/node_modules is missing — run npm install there. Gate did not run; this is NOT a quiet day."
+  notify "gate did not run: scripts/node_modules missing"
+  exit 1
+fi
+ln -s "$REPO/scripts/node_modules" "$WT/scripts/node_modules" || {
+  log "FAIL could not link node_modules into the worktree"
+  notify "gate did not run: node_modules link failed"
+  exit 1
+}
 
 OUT="$(cd "$WT" && "$NODE_BIN" scripts/metrics-digest.mjs --gate 2>&1)"
 RC=$?
@@ -82,6 +112,10 @@ RC=$?
 case "$RC" in
   0)
     log "FIRE $OUT"
+    if [ "$DRY_RUN" = "1" ]; then
+      log "dry-run: would POST trigger $TRIGGER_ID to routine $ROUTINE_ID; not firing"
+      exit 0
+    fi
     AUTH=()
     [ -n "${PAPERCLIP_API_KEY:-}" ] && AUTH=(-H "x-api-key: $PAPERCLIP_API_KEY")
     # `${AUTH[@]+"${AUTH[@]}"}`, not the plain `"${AUTH[@]}"`. Under `set -u`,
@@ -105,6 +139,7 @@ case "$RC" in
     ;;
   20)
     log "quiet $OUT"
+    [ "$DRY_RUN" = "1" ] && log "dry-run: quiet day, nothing would have fired"
     ;;
   *)
     log "FAIL gate exited $RC — the check did not run, so this is NOT a quiet day: $OUT"
