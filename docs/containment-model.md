@@ -5,6 +5,11 @@
 control-repo copy that `agents/*/TOOLS.md` links to, so an agent reading its own deny list can see
 what that list is and is not.
 
+> **Paths in this document name *source* files.** Controls A and B live in
+> `scripts/agent-launch.sh`, but agents exec the *deployed* copy at
+> `~/.appforge/bin/agent-launch.sh`. Editing the source changes nothing live
+> until someone deploys it — see `docs/runtime-launcher.md` (APP-137).
+
 ## The one-line version
 
 There is **one** containment boundary and it is the **OS uid** agent processes run as
