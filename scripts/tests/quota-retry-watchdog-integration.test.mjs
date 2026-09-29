@@ -216,6 +216,129 @@ test('runOnce (dry-run): a due pending action fires resume+wake, and a not-yet-d
 });
 
 // ---------------------------------------------------------------------------
+// APP-181: the resumed run must stay task-bound.
+//
+// A wake with no `issueId` in its payload produces a run whose
+// `contextSnapshot` carries only the wake reason/source. The server's
+// `readRunSourceIssueId` then returns null, and its cross-issue-influence
+// limiter fails closed on every `PATCH /api/issues/:id` and
+// `POST /api/issues/:id/comments` -- including writes to the issue the run
+// itself checked out, because the limiter's same-issue exemption has no
+// source issue to compare against. The regression these two tests lock down
+// is the one the CEO asked for in words: a resumed run retains the
+// task-bound classification of the run it resumed.
+// ---------------------------------------------------------------------------
+
+test('APP-181: a provider_quota failure records the interrupted run\'s issue on the pending action', async () => {
+  const nowMs = Date.now();
+  const failedAtIso = new Date(nowMs).toISOString();
+  const issueId = 'a9883bd9-1111-4222-8333-444455556666';
+  const runs = [
+    {
+      id: 'run-quota-bound',
+      agentId: 'agent-cto',
+      status: 'failed',
+      errorCode: 'provider_quota',
+      error: formatResetText(nowMs + 3 * 3_600_000 + 30_000),
+      createdAt: failedAtIso,
+      startedAt: failedAtIso,
+      finishedAt: failedAtIso,
+      contextSnapshot: { issueId, taskId: issueId, wakeReason: 'issue_assigned' },
+    },
+  ];
+
+  const state = await withFakeFetch(
+    [
+      ['/heartbeat-runs', runs],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]],
+    ],
+    () =>
+      runOnce(
+        { apiBase: 'http://fake', companyId: 'fake-co', apiKey: null, stateFile: tmpStateFile(), claudeConfigDir: '/tmp', lookbackMinutes: 180, dryRun: true },
+        { log: () => {} },
+      ),
+  );
+
+  assert.equal(state.pendingActions['agent-cto'].issueId, issueId,
+    'the issue must be captured at schedule time -- the failed run is gone from the lookback window by the time the resume fires hours later');
+});
+
+test('APP-181: the fired wake carries --payload {"issueId"} so the resumed run is task-bound', async () => {
+  const { emptyState, setPendingAction } = await import('../lib/quota-retry-watchdog.mjs');
+  const issueId = 'a9883bd9-1111-4222-8333-444455556666';
+  const state = emptyState();
+  setPendingAction(state, 'agent-cto', {
+    kind: 'quota', runId: 'run-x', issueId, scheduledAtMs: 1000,
+    reason: 'resuming after provider_quota reset (watchdog)',
+  });
+  // An agent whose interrupted run genuinely had no issue: still resumed, but
+  // deliberately woken unbound rather than bound to a guess.
+  setPendingAction(state, 'agent-ceo', {
+    kind: 'quota', runId: 'run-y', issueId: null, scheduledAtMs: 1000,
+    reason: 'resuming after provider_quota reset (watchdog)',
+  });
+
+  const { writeFileSync, mkdtempSync: mkdtemp } = await import('node:fs');
+  const stateFile = join(mkdtemp(join(tmpdir(), 'watchdog-test-')), 'state.json');
+  writeFileSync(stateFile, JSON.stringify(state));
+
+  const logs = [];
+  await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [
+        { id: 'agent-cto', name: 'CTO', status: 'idle' },
+        { id: 'agent-ceo', name: 'CEO', status: 'idle' },
+      ]],
+    ],
+    () =>
+      runOnce(
+        { apiBase: 'http://fake', companyId: 'fake-co', apiKey: null, stateFile, claudeConfigDir: '/tmp', lookbackMinutes: 180, dryRun: true },
+        { log: (l) => logs.push(l) },
+      ),
+  );
+
+  const ctoWake = logs.find((l) => l.includes('agent wake agent-cto'));
+  assert.ok(ctoWake, 'expected a wake command for the bound agent');
+  assert.ok(ctoWake.includes(`--payload {"issueId":"${issueId}"}`),
+    `the wake must carry the issue binding, got: ${ctoWake}`);
+  assert.ok(logs.some((l) => l.includes('WAKE agent=CTO') && l.includes(`issue=${issueId}`)),
+    'the log line should name the issue the resumed run is bound to');
+
+  const ceoWake = logs.find((l) => l.includes('agent wake agent-ceo'));
+  assert.ok(ceoWake, 'an unbound pending action must still be resumed and woken');
+  assert.ok(!ceoWake.includes('--payload'), 'an absent issue must not be forwarded as a null/empty payload');
+  assert.ok(logs.some((l) => l.includes('WAKE agent=CEO') && l.includes('UNBOUND')),
+    'the unbound case must be named in the log, since that run will hit the APP-181 403');
+});
+
+test('APP-181: a pending action written by a pre-fix watchdog build (no issueId key) still resumes, unbound', async () => {
+  const { emptyState, setPendingAction } = await import('../lib/quota-retry-watchdog.mjs');
+  const state = emptyState();
+  setPendingAction(state, 'agent-cto', {
+    kind: 'quota', runId: 'run-legacy', scheduledAtMs: 1000,
+    reason: 'resuming after provider_quota reset (watchdog)',
+  });
+  const { writeFileSync, mkdtempSync: mkdtemp } = await import('node:fs');
+  const stateFile = join(mkdtemp(join(tmpdir(), 'watchdog-test-')), 'state.json');
+  writeFileSync(stateFile, JSON.stringify(state));
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [['/heartbeat-runs', []], ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]]],
+    () =>
+      runOnce(
+        { apiBase: 'http://fake', companyId: 'fake-co', apiKey: null, stateFile, claudeConfigDir: '/tmp', lookbackMinutes: 180, dryRun: true },
+        { log: (l) => logs.push(l) },
+      ),
+  );
+
+  assert.ok(logs.some((l) => l.includes('RESUME agent=CTO')), 'a state file from the previous build must not strand the agent paused');
+  assert.ok(logs.some((l) => l.includes('WAKE agent=CTO') && l.includes('UNBOUND')));
+  assert.equal(finalState.pendingActions['agent-cto'], undefined);
+});
+
+// ---------------------------------------------------------------------------
 // Acceptance criterion (task item 4): session-burn.mjs's `retriedWithinResetWindow`
 // should go to zero once the watchdog is in place.
 // ---------------------------------------------------------------------------

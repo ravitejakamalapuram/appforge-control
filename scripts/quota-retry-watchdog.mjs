@@ -73,6 +73,7 @@ import {
   setPendingAction,
   clearPendingAction,
   duePendingActions,
+  readRunIssueId,
 } from './lib/quota-retry-watchdog.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -221,11 +222,22 @@ function pauseAgent(agentId, ctx) {
 function resumeAgent(agentId, ctx) {
   return paperclipCli(['agent', 'resume', agentId], { ...ctx, describe: `resume ${agentId}` });
 }
-function wakeAgent(agentId, reason, ctx) {
-  return paperclipCli(
-    ['agent', 'wake', agentId, '--source', 'automation', '--trigger', 'system', '--reason', reason],
-    { ...ctx, describe: `wake ${agentId}` },
-  );
+// A wake with no `issueId` in its payload produces a run the server does not
+// consider task-bound: `contextSnapshot` carries only the wake reason/source,
+// so `readRunSourceIssueId` returns null and every `PATCH /api/issues/:id`
+// and `POST /api/issues/:id/comments` from that run is refused with
+// `403 cross_issue_influence_run_context_required` -- even on the issue the
+// run itself checked out, because the limiter's same-issue exemption needs a
+// source issue to compare against (APP-181). Forwarding the interrupted run's
+// own issue restores the binding the interruption lost.
+//
+// This is not a widening of what the agent may do: the issue is the one that
+// agent was already working, the wake route's own execution-blocker check
+// still applies, and an agent with no recorded issue is still woken unbound.
+function wakeAgent(agentId, reason, ctx, { issueId = null } = {}) {
+  const args = ['agent', 'wake', agentId, '--source', 'automation', '--trigger', 'system', '--reason', reason];
+  if (issueId) args.push('--payload', JSON.stringify({ issueId }));
+  return paperclipCli(args, { ...ctx, describe: `wake ${agentId}` });
 }
 
 // -- main pass --------------------------------------------------------------
@@ -288,6 +300,7 @@ export async function runOnce(args, { log }) {
       setPendingAction(state, run.agentId, {
         kind: 'quota',
         runId: run.id,
+        issueId: readRunIssueId(run),
         scheduledAtMs,
         reason: 'resuming after provider_quota reset (watchdog)',
       });
@@ -315,6 +328,7 @@ export async function runOnce(args, { log }) {
       setPendingAction(state, run.agentId, {
         kind: 'backoff',
         runId: run.id,
+        issueId: readRunIssueId(run),
         scheduledAtMs,
         reason: `resuming after ${run.errorCode} backoff attempt ${attempt} (watchdog)`,
       });
@@ -329,8 +343,19 @@ export async function runOnce(args, { log }) {
     const name = agentName(agentId);
     await resumeAgent(agentId, cliCtx);
     log(`RESUME agent=${name} (was pending ${action.kind} for run=${action.runId})`);
-    await wakeAgent(agentId, action.reason, cliCtx);
-    log(`WAKE agent=${name} reason="${action.reason}"`);
+    // `action.issueId` is absent for pending actions written by a watchdog
+    // build older than APP-181, and null for an interrupted run the runtime
+    // never bound. Both still get woken -- unbound, as before -- but the log
+    // says so, because that run will hit the 403 this binding exists to
+    // prevent and the operator should not have to infer it.
+    const issueId = action.issueId || null;
+    await wakeAgent(agentId, action.reason, cliCtx, { issueId });
+    log(
+      `WAKE agent=${name} reason="${action.reason}" ` +
+        (issueId
+          ? `issue=${issueId} (task-bound: the resumed run can PATCH and comment)`
+          : 'issue=none (UNBOUND: the resumed run will be refused issue PATCH/comment -- APP-181)'),
+    );
     clearPendingAction(state, agentId);
   }
 
