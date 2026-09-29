@@ -13,7 +13,7 @@ these run as scripts, not model calls, per `config/models.yaml`'s
 `APPFORGE_ENV`, `PAPERCLIP_API_URL`, `PAPERCLIP_API_KEY` (run JWT),
 `APPFORGE_EDGE_URL`, `APPFORGE_EDGE_TOKEN_READ`, `ANTHROPIC_API_KEY`.
 
-### If control-plane writes start failing (APP-64)
+### If control-plane writes start failing, or land as the board (APP-64, APP-119)
 
 `PAPERCLIP_API_KEY` is a JWT whose `run_id` claim binds this run. If the
 server cannot resolve it to a live run, **every** comment and status write in
@@ -22,12 +22,36 @@ code whose name says "cross-issue" but which fires just as readily on your own
 checked-out issue. The condition is fixed for the life of the run, so retrying
 never helps.
 
+There is a second, quieter failure (APP-119). This instance runs in
+`local_trusted` mode, where a request the middleware reads as carrying **no**
+credential is accepted **as the board** — it returns 2xx and is stored as
+`authorType: user` / `authorUserId: local-board`, with nothing in the response
+saying the credential was ignored. Sending `X-Paperclip-Api-Key:
+$PAPERCLIP_API_KEY` instead of `Authorization: Bearer $PAPERCLIP_API_KEY`
+reaches it by accident. It is not cosmetic: a board comment fires an
+`issue_commented` wake and gets founder reopen semantics, so one mistyped header
+has moved an issue from `done` back to `todo` and cancelled its retry run.
+
 Run `~/git-personal/appforge-control/scripts/paperclip-run-check.sh` to find
 out in one call — use that absolute path, your heartbeat cwd is the project
-workspace, not the checkout. Exit `0` means a write probe actually succeeded;
-`1` means every write this run will 403; `2` means the check could not be
-completed and is not an all-clear. On `1`, deliver via the courier pattern
-(issue creation stays open) instead of going silent. Full decoder:
+workspace, not the checkout. It probes a write and then reads the activity log
+back to check how that write was recorded:
+
+- `0` — the probe succeeded **and** was recorded as this agent and this run.
+- `1` — every write this run will 403. Deliver via the courier pattern (issue
+  creation stays open) instead of going silent.
+- `2` — the check could not be completed, or the write landed but its
+  attribution could not be read back. **Not an all-clear.**
+- `3` — the write succeeded but was recorded as **the board**. Do not write:
+  report the run id in your final response and deliver there.
+
+Exit `0` proves the control plane attributes a *correctly formed* write from
+this run; it cannot see a later call of yours that launders itself under the
+wrong header name. So send both `Authorization: Bearer $PAPERCLIP_API_KEY` and
+`X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID` on every call, and check `authorType` in
+the response of every write. If one of yours did land as `local-board`, claim it
+in a follow-up comment — do not delete or edit the mis-stamped record, it is the
+audit evidence. Full decoder for both families:
 `docs/paperclip-run-binding.md` in `appforge-control`.
 
 ## Working with repos (APP-72)
