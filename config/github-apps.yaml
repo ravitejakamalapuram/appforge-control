@@ -31,7 +31,37 @@ apps:
       - release-platform # separate, more locked-down appforge-release App (not yet created)
       - InvTrack # kept fully hands-off from agents per founder's extra-care policy
 
-  # appforge-release: not yet created. Needs actions:write on release-platform
-  # only, and its private key must only ever be readable by the CTO/Release
-  # agent's env (§17.1). Create when P1-13's release-gating work is ready to
-  # be exercised by a live agent rather than the founder's own gh CLI.
+  # appforge-release: NOT YET CREATED, and its permission set is NOT settled.
+  # The ruling is open on APP-92. Do not create this App from the sketch that
+  # used to sit here ("needs actions:write on release-platform only") - that
+  # sketch is unsafe as written and is why this block was rewritten.
+  #
+  # Why the old sketch is unsafe: it assumed the private key could be fenced to
+  # "the CTO/Release agent's env" (master plan §17.1). It cannot be, on this
+  # machine. Every agent runs under ONE uid and every key in secrets/ is
+  # readable by all of them (agent-launch.sh, WHAT THIS DOES NOT CLOSE item 1;
+  # DEC-0016). github-app-token.mjs takes --app, so any agent can mint from any
+  # App listed here. An actions:write key in this directory is therefore a
+  # production-release dispatch button for EVERY agent, including low-trust
+  # ones - the exact opposite of what the release-platform exclusion holds.
+  #
+  # Constraints any future spec must satisfy, measured 2026-09-29 (APP-92):
+  #   - release-platform is a PUBLIC repo. Its workflows and history are
+  #     world-readable; a bad push there is a public event, not an internal one.
+  #   - App installation tokens are refused on .github/workflows/** unless the
+  #     App holds `workflows` permission ("refusing to allow a GitHub App to
+  #     create or update workflow ... without `workflows` permission",
+  #     reproduced against appforge-control this run). So the release pipeline
+  #     definitions stay out of agent reach as long as `workflows` is withheld
+  #     - that one is enforced by GitHub, not by us. See APP-138.
+  #   - `contents: write` alone still permits a direct push to main unless
+  #     branch protection requires a PR. Protection on release-platform's main
+  #     is a precondition of any write-capable install, not a nice-to-have.
+  #
+  # Split the two jobs; do not give one App both:
+  #   1. Opening PRs on release-platform (what APP-69 needs today):
+  #      contents: write, pull_requests: write, metadata: read. No actions,
+  #      no workflows, no administration.
+  #   2. Dispatching a release (actions: write): stays with the founder's own
+  #      gh CLI until agents are uid-isolated. Nothing in secrets/ can hold a
+  #      dispatch-capable key before then.
