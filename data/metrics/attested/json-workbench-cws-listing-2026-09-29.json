@@ -1,0 +1,18 @@
+{
+  "_why": "Attested extract, not page bytes. There is no automation channel to a browser in this runtime (APP-54: Playwright absent, npm egress 403, no browser tool, Brave without --remote-debugging-port), so the agent that parses a listing cannot fetch one. QA captured the real page on APP-156; `upstream_sha256` is the hash of the bytes QA received, NOT a hash of anything reconstructed here. The raw artifact is attached to APP-156 and is deliberately not duplicated into this repo.",
+  "item_id": "json-workbench",
+  "source": "cws_public_listing",
+  "captured_by": "QA (agent a900b967-a763-4f2e-ba84-fc4d0cfef868), APP-156",
+  "captured_at": "2026-09-29T04:38:52Z",
+  "artifact_ref": "APP-156 attachments: json-workbench-public-listing-extract.json + gzipped page",
+  "upstream_sha256": "04c8d1ff8151bea3be6586a43f2af54fef9c6a79a1b292b5fe64bb57f36422e5",
+  "http_status": 200,
+  "byte_length": 648234,
+  "rating_block_verbatim": "5.0 ( 1 rating )",
+  "declared_freshness": "Ratings are updated daily and may not reflect the most recent reviews.",
+  "scope_note": "QA scoped extraction to the item's own block. The page also rendered 4.5, 4.6 and 4.2 for RECOMMENDED extensions, which are NOT json-workbench's.",
+  "refused_observations": {
+    "users": "3 users"
+  },
+  "_refused_why": "The listing's `3 users` is the public-listing surface, not the dashboard's Weekly Users page. The two disagreed for json-workbench (5 on 2026-09-27 dashboard vs 3 on 2026-09-28 listing). Mapping it to cws_weekly_users would answer the open APP-54 question with the wrong instrument. Recorded here only so it is not rediscovered later as fresh evidence."
+}
