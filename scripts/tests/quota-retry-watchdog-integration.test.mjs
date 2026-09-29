@@ -254,3 +254,83 @@ test('acceptance: quotaWaste().retriedWithinResetWindow reflects today\'s bug ("
   const after = quotaWaste(afterRuns);
   assert.equal(after.retriedWithinResetWindow, 0, 'the watchdog design should drive this metric to zero');
 });
+
+// ---------------------------------------------------------------------------
+// APP-164: the resume must TELL the woken agent which of its `blocked` issues
+// are pause-cancellation collateral rather than real dependency holds. The
+// watchdog holds no credential that can satisfy the owner gate on the
+// hand-back route (run-scoped JWTs), so naming them in the wake is the whole
+// mechanism -- if the note is missing, nothing downstream ever clears them.
+// ---------------------------------------------------------------------------
+test('runOnce (dry-run): the resume wake names the agent\'s pause-cancellation collateral, and never tries to resolve it itself', async () => {
+  const { emptyState, setPendingAction } = await import('../lib/quota-retry-watchdog.mjs');
+  const state = emptyState();
+  setPendingAction(state, 'agent-cto', {
+    kind: 'quota',
+    runId: 'run-x',
+    scheduledAtMs: 1000,
+    reason: 'resuming after provider_quota reset (watchdog)',
+  });
+
+  const { writeFileSync, mkdtempSync: mkdtemp } = await import('node:fs');
+  const stateFile = join(mkdtemp(join(tmpdir(), 'watchdog-test-')), 'state.json');
+  writeFileSync(stateFile, JSON.stringify(state));
+
+  const strandedAction = (returnOwner, assignee) => ({
+    id: 'act-1',
+    status: 'active',
+    cause: 'stranded_assigned_issue',
+    returnOwnerAgentId: returnOwner,
+    createdAt: '2026-09-29T18:00:00.000Z',
+    evidence: { latestRunId: 'run-dead', latestRunStatus: 'cancelled', latestRunErrorCode: 'agent_paused' },
+  });
+
+  const logs = [];
+  const seen = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push(`${opts?.method ?? 'GET'} ${url}`);
+    const payload = url.includes('/heartbeat-runs')
+      ? []
+      : url.includes('/agents')
+        ? [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]
+        : url.includes('/issues')
+          ? {
+              issues: [
+                {
+                  id: 'i-1',
+                  identifier: 'APP-999',
+                  title: 'collateral',
+                  status: 'blocked',
+                  assigneeAgentId: 'agent-cto',
+                  activeRecoveryAction: strandedAction('agent-cto'),
+                },
+              ],
+            }
+          : null;
+    if (payload === null) throw new Error(`unexpected fetch: ${url}`);
+    return { ok: true, status: 200, json: async () => payload, text: async () => '' };
+  };
+  try {
+    await runOnce(
+      { apiBase: 'http://fake', companyId: 'fake-co', apiKey: 'k', stateFile, claudeConfigDir: '/tmp', lookbackMinutes: 180, dryRun: true },
+      { log: (l) => logs.push(l) },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const wake = logs.find((l) => l.includes('DRY-RUN would run: paperclipai agent wake'));
+  assert.ok(wake, 'a wake must be issued');
+  assert.match(wake, /APP-999/, 'the wake reason must name the collateral issue');
+  assert.match(wake, /clear-my-recovery-collateral/, 'and must tell the agent how to clear it');
+  assert.ok(logs.some((l) => l.includes('COLLATERAL   APP-999')), 'and it is reported in the log');
+  assert.ok(
+    !logs.some((l) => l.includes('COLLATERAL lookup failed')),
+    'the lookup must actually have succeeded, not silently failed soft',
+  );
+  assert.ok(
+    !seen.some((s) => s.includes('recovery-actions/resolve')),
+    'the daemon must never issue the hand-back write itself -- it holds no credential that can own it',
+  );
+});
