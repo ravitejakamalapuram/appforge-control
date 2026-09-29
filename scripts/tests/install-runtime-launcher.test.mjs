@@ -11,6 +11,14 @@
 //
 // The fixture is a synthetic repo with a zero-dependency package.json, so
 // `npm ci` runs offline and these tests need no network.
+//
+// APP-217: the fixture's file list is PARSED OUT OF the installer rather than
+// restated here. It was restated here once, and #31 (APP-164) then added two
+// hard dependencies to the installer without the fixture learning about them.
+// Both PRs were green against the main of their day; their merge was red, and
+// every install path in this suite failed for a week. Adding a hard dependency
+// now either updates this fixture automatically or fails with a message naming
+// the file, which is the difference between a caught desync and a silent one.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -31,30 +39,87 @@ const git = (cwd, ...args) =>
   });
 
 /**
- * A synthetic appforge-control: the file set the installer copies, a zero-dep
- * lockfile so `npm ci` is offline, and an unversioned private key. Committed on
- * `main`, tagged, and given an `origin` remote so `origin/main` resolves
- * without a network.
+ * The installer's hard-dependency set, read out of install-runtime-launcher.sh
+ * itself: the `VERSIONED=( "<repo path>:<install path>:<mode>" ... )` array is
+ * the single place that list exists, and it is the same array the installer
+ * loops over to refuse a ref that is missing a file.
+ *
+ * Throws rather than returning a short list if the array cannot be found or an
+ * entry does not parse. A silently-truncated dependency set is exactly the
+ * failure this replaces, so a format change must be loud.
+ */
+function parseVersionedSet(scriptPath) {
+  const block = /^VERSIONED=\(\n([\s\S]*?)^\)$/m.exec(readFileSync(scriptPath, 'utf8'));
+  if (!block) throw new Error(`no VERSIONED=( ... ) array in ${scriptPath}; the installer's format changed`);
+
+  const entries = block[1].split('\n').filter((l) => l.trim() && !l.trim().startsWith('#'));
+  const specs = entries.map((line) => {
+    const m = /^\s*"([^":]+):([^":]+):([0-7]{4})"\s*$/.exec(line);
+    if (!m) throw new Error(`cannot parse VERSIONED entry ${JSON.stringify(line)} in ${scriptPath}`);
+    return { source: m[1], install: m[2], mode: parseInt(m[3], 8) };
+  });
+  if (specs.length === 0) throw new Error(`VERSIONED is empty in ${scriptPath}`);
+  return specs;
+}
+
+const VERSIONED = parseVersionedSet(INSTALL);
+
+/**
+ * Synthetic bodies for each versioned path, keyed by the repo path the
+ * installer names. Keyed rather than positional so a reordering of VERSIONED
+ * cannot silently swap two files' contents.
+ *
+ * The bodies are not arbitrary: the installer runs `bash -n` / `node --check`
+ * over the staged copies, and it imports the staged watchdog from bin/ to prove
+ * bin/lib/ landed beside it. The watchdog fixture therefore imports BOTH libs
+ * the real one does — a stub with no imports would let that layout check pass
+ * on an install that never shipped bin/lib/.
+ */
+const FIXTURE_BODIES = {
+  'scripts/agent-launch.sh': '#!/bin/bash\necho launcher v1\n',
+  'scripts/github-app-token.mjs': 'export const v = 1;\n',
+  'scripts/prune-agent-worktrees.sh': '#!/bin/bash\nexit 0\n',
+  'scripts/lib/github-app.mjs': 'export const app = 1;\n',
+  'scripts/quota-retry-watchdog.mjs':
+    "import { tick } from './lib/quota-retry-watchdog.mjs';\n" +
+    "import { collateral } from './lib/quota-pause-collateral.mjs';\n" +
+    'export const watchdog = { tick, collateral };\n',
+  'scripts/lib/quota-retry-watchdog.mjs': 'export const tick = () => 1;\n',
+  'scripts/lib/quota-pause-collateral.mjs': 'export const collateral = () => 1;\n',
+  'scripts/package.json': JSON.stringify({ name: 'fixture', private: true, type: 'module' }, null, 2) + '\n',
+  'scripts/package-lock.json': JSON.stringify({
+    name: 'fixture', lockfileVersion: 3, requires: true,
+    packages: { '': { name: 'fixture', private: true } },
+  }, null, 2) + '\n',
+  '.gitconfig-appforge': '[user]\n\tname = appforge\n',
+  'config/github-apps.yaml': 'apps:\n  - name: fixture\n    private_key_path: secrets/fixture.private-key.pem\n',
+};
+
+/**
+ * A synthetic appforge-control: every file the installer hard-depends on, a
+ * zero-dep lockfile so `npm ci` is offline, and an unversioned private key.
+ * Committed on `main`, tagged, and given an `origin` remote so `origin/main`
+ * resolves without a network.
  */
 function makeFixture() {
   const root = mkdtempSync(path.join(tmpdir(), 'appforge-install-test-'));
   const repo = path.join(root, 'control');
-  mkdirSync(path.join(repo, 'scripts', 'lib'), { recursive: true });
-  mkdirSync(path.join(repo, 'config'), { recursive: true });
   mkdirSync(path.join(repo, 'secrets'), { recursive: true });
 
-  const w = (rel, body) => writeFileSync(path.join(repo, rel), body);
-  w('scripts/agent-launch.sh', '#!/bin/bash\necho launcher v1\n');
-  w('scripts/github-app-token.mjs', 'export const v = 1;\n');
-  w('scripts/prune-agent-worktrees.sh', '#!/bin/bash\nexit 0\n');
-  w('scripts/lib/github-app.mjs', 'export const app = 1;\n');
-  w('scripts/package.json', JSON.stringify({ name: 'fixture', private: true, type: 'module' }, null, 2) + '\n');
-  w('scripts/package-lock.json', JSON.stringify({
-    name: 'fixture', lockfileVersion: 3, requires: true,
-    packages: { '': { name: 'fixture', private: true } },
-  }, null, 2) + '\n');
-  w('.gitconfig-appforge', '[user]\n\tname = appforge\n');
-  w('config/github-apps.yaml', 'apps:\n  - name: fixture\n    private_key_path: secrets/fixture.private-key.pem\n');
+  const w = (rel, body) => {
+    mkdirSync(path.join(repo, path.dirname(rel)), { recursive: true });
+    writeFileSync(path.join(repo, rel), body);
+  };
+  for (const { source } of VERSIONED) {
+    const body = FIXTURE_BODIES[source];
+    if (body === undefined) {
+      throw new Error(
+        `install-runtime-launcher.sh hard-depends on ${source}, which this fixture does not provision. ` +
+        'Add a body for it to FIXTURE_BODIES — the installer will refuse to install a ref that is ' +
+        'missing the file, so leaving it out fails every install path in this suite (APP-217).');
+    }
+    w(source, body);
+  }
   w('.gitignore', 'secrets/\nscripts/node_modules/\n');
   // Unversioned by design — present in the working tree, in no commit.
   w('secrets/fixture.private-key.pem', 'KEY-MATERIAL-V1\n');
@@ -95,7 +160,7 @@ test('installs from a tag and writes a manifest the drift detector can parse', (
   const manifest = parseReleaseManifest(release(fx));
   assert.equal(manifest.sourceRef, 'refs/tags/runtime-v1');
   assert.equal(manifest.sourceCommit, git(fx.repo, 'rev-parse', 'refs/tags/runtime-v1^{commit}').trim());
-  assert.equal(manifest.files.length, 8);
+  assert.equal(manifest.files.length, VERSIONED.length);
 
   // Every entry must carry its own source path. Without the fourth column the
   // detector falls back to a hard-coded table and anything missing from it goes
@@ -109,15 +174,37 @@ test('installs from a tag and writes a manifest the drift detector can parse', (
 test('the layout is mirrored, not flattened — Control A depends on it', () => {
   const fx = makeFixture();
   assert.equal(install(fx, ['--ref', 'origin/main']).code, 0);
+
+  // Every versioned file, at the install path and mode the installer declares.
+  // Asserting the whole VERSIONED set rather than a sample is what makes an
+  // added hard dependency land somewhere this test actually looks (APP-217).
+  for (const { install: rel, mode } of VERSIONED) {
+    const abs = path.join(fx.prefix, rel);
+    assert.ok(existsSync(abs), `${rel} is missing from the install`);
+    assert.equal(lstatSync(abs).mode & 0o777, mode, `${rel} has the wrong mode`);
+  }
+  // The four resolutions the LAYOUT INVARIANT comment names, spelled out so a
+  // flattening shows up as a named failure rather than a mode mismatch.
   for (const rel of [
     '.gitconfig-appforge',          // one level above bin/, per REPO_ROOT=$SCRIPT_DIR/..
     'bin/agent-launch.sh',
     'bin/lib/github-app.mjs',
+    'bin/lib/quota-pause-collateral.mjs',  // per the watchdog's $SCRIPT_DIR/lib/
     'config/github-apps.yaml',      // per CONTROL_ROOT=<minter dir>/..
     'secrets/fixture.private-key.pem',
   ]) {
     assert.ok(existsSync(path.join(fx.prefix, rel)), `${rel} is missing from the install`);
   }
+});
+
+test('the fixture provisions exactly the installer\'s hard-dependency set', () => {
+  // Guards the guard: if parseVersionedSet ever silently returns a short list,
+  // every other test in this file would pass against a fixture the installer no
+  // longer matches. Compare both directions.
+  const declared = VERSIONED.map((v) => v.source).sort();
+  const provisioned = Object.keys(FIXTURE_BODIES).sort();
+  assert.deepEqual(provisioned, declared,
+    'FIXTURE_BODIES and install-runtime-launcher.sh VERSIONED have diverged');
 });
 
 test('versioned files come from the commit, never from the working tree', () => {
