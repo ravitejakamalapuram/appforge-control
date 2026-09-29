@@ -51,7 +51,25 @@ export function runImport(args) {
   const dataRoot = args.data_root ?? 'data';
   const exportedAt = args.exported_at ?? new Date().toISOString();
 
-  if (!source) throw new Error('--source is required (cws | cws_listing | play)');
+  if (!source) throw new Error('--source is required (cws | cws_listing | play | ga4)');
+  if (source === 'ga4') {
+    // APP-157: named explicitly so the failure explains itself. The read path
+    // is decided and documented, but it is NOT a service account — the CWS
+    // property grants the developer Marketer, which cannot manage users, so
+    // only OAuth USER credentials can read it. Nothing is provisioned: the
+    // Store-listing opt-in has not been clicked, so no property and no
+    // property id exist, and no refresh token is bound.
+    throw new Error(
+      'source "ga4" has no importer yet, and it is blocked on founder access, ' +
+        'not on code. Requires: (1) Store listing -> Additional metrics -> ' +
+        '"Opt in to Google Analytics"; (2) an OAuth client whose consent screen ' +
+        'is "In production" (a "Testing" client issues a refresh token that ' +
+        'expires in 7 days, which would put the founder back in the loop every ' +
+        'week); (3) the refresh token bound as a Paperclip secret to the ingest ' +
+        'job only. A GA4 service account can NEVER work here. ' +
+        'See docs/metrics-ingest.md section 3.'
+    );
+  }
   if (!itemId) throw new Error('--item is required (the store item id)');
   if (!file) throw new Error('--file is required');
 

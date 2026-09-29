@@ -27,6 +27,10 @@ const STORE_SOURCES = new Set([
   'play_reports_bucket',
   'play_developer_reporting_api',
   'cws_public_listing',
+  // APP-157: declared before it is provisioned, on purpose. These read
+  // `missing` until the founder opt-in + OAuth consent land, which is the
+  // honest state — a metric we have decided to collect and cannot yet read.
+  'ga4_cws_property',
 ]);
 
 export function buildStatus({ portfolioPath, dataRoot, itemId = null, now = new Date() }) {

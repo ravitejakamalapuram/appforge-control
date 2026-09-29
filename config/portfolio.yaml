@@ -240,6 +240,60 @@ metrics:
     max_age_days: 14
     measurability: MEASURABLE_NOW
 
+  # ---- Chrome Web Store GA4 (APP-157) ----
+  # A SECOND, INDEPENDENT instrument on the same two quantities the dashboard
+  # export reports. Landed as its own names on purpose: the GA4 property counts
+  # store-listing-funnel EVENTS, the dashboard reports the store's own
+  # accounting. They will not agree, and the disagreement is information, not
+  # an error to reconcile away. See forbidden_aliases and
+  # docs/metrics-ingest.md §3.
+  #
+  # source: the CWS-created GA4 property (named with the extension id), read
+  # through the GA4 Data API with OAuth USER credentials. Not a service
+  # account: the developer holds Marketer, which "can't be changed", and only
+  # Administrator can add a user to a property — so no service account can ever
+  # be granted read access. §3.1 records the full chain.
+  #
+  # RETENTION IS TWO MONTHS AND WE CANNOT RAISE IT. These are current-period
+  # readings only. Any history is history our own ingest accumulated. Never
+  # treat a GA4 series as backfillable.
+  #
+  # A DAY WITH NO ROW IS `missing`, NOT 0. De-identification is on and CWS
+  # withholds data below system thresholds; at single-digit volumes that will
+  # happen. An importer that writes 0 for a thresholded day fabricates a
+  # reading.
+  ga4_install_events:
+    source: ga4_cws_property
+    origin: store
+    cadence: daily
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+    available_today: false     # opt-in not clicked; no property, no secret — APP-157 §3.7
+    definition_warning: |
+      NOT `cws_installs`. This is the count of the CWS-emitted `install` custom
+      event, which Google documents as "only sent if a user accepts the
+      permission prompt to complete the install" — a funnel event observed at
+      the listing. `cws_installs` is the store's own install accounting from the
+      dashboard export. Different instruments, different numbers.
+
+      `store_listing_conversion` stays defined on the DASHBOARD family
+      (cws_installs / cws_listing_page_views). Mixing a GA4 numerator with a
+      dashboard denominator is the exact error forbidden_aliases exists to stop.
+
+  ga4_listing_page_views:
+    source: ga4_cws_property
+    origin: store
+    cadence: daily
+    max_age_days: 14
+    measurability: MEASURABLE_NOW
+    available_today: false     # same gate as ga4_install_events — APP-157 §3.7
+    definition_warning: |
+      NOT `cws_listing_page_views`. This is GA4's `page_view` on the store
+      listing as the store's GA4 integration emits it; the dashboard reports its
+      own listing-page-views figure. Two instruments on one quantity, kept as
+      two columns for the same reason `cws_weekly_users`,
+      `play_active_devices_30d` and `true_wau` are three.
+
   # APP-163 (QA, 2026-09-29): both rating fields were attributed to
   # `cws_dashboard_export`, which made them look blocked on the founder
   # dashboard-export card. They are on NEITHER of the dashboard's Analytics
@@ -583,6 +637,10 @@ forbidden_aliases:
     why: "`maintenance_cost` was revision 1's name for a DIFFERENT derivation (it included support_cost). Reusing the old name for the new quantity would silently change every reference to it. The old name is retired, not aliased."
   - pair: [retention_d30, uninstall_rate_7d]
     why: "The most likely proxy anyone would reach for, and the one DEC-0009 D3 forbids absolutely."
+  - pair: [ga4_install_events, cws_installs]
+    why: "A store-listing-funnel `install` EVENT count (GA4, sent only when the permission prompt is accepted) vs. the store's own install accounting (dashboard export). Two instruments on one quantity; they will not agree, and the gap is information. APP-157 §3.5."
+  - pair: [ga4_listing_page_views, cws_listing_page_views]
+    why: "GA4's `page_view` on the listing vs. the dashboard's own listing-page-views figure. Same conflation risk as the installs pair — and the one that would silently corrupt `store_listing_conversion`, EXP-0001's primary metric, by mixing a GA4 numerator with a dashboard denominator. APP-157 §3.5."
 
 # ===========================================================================
 # 4. NOISE FLOOR — why min_n is 30 and not a rounder number
