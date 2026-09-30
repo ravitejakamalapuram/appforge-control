@@ -31,11 +31,24 @@ import { parseReleaseManifest } from '../lib/launcher-drift.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const INSTALL = path.join(here, '..', 'install-runtime-launcher.sh');
 
+// Fixture identity lives in a file this suite owns, never in each fixture's own
+// .git/config: a host agent rewrites that file underneath a fresh repo and can
+// drop a value we just wrote (APP-223). GIT_CONFIG_SYSTEM and GIT_CONFIG_COUNT
+// are neutralised so nothing ambient reaches a fixture either - the launcher
+// exports GIT_CONFIG_KEY/VALUE pairs (credential helper, GitHub auth header)
+// that have no business in a hermetic local repo.
+const FIXTURE_GITCONFIG = path.join(here, 'fixtures', 'gitconfig-fixture-identity');
+const FIXTURE_GIT_ENV = {
+  GIT_CONFIG_GLOBAL: FIXTURE_GITCONFIG,
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_CONFIG_COUNT: '0',
+};
+
 const git = (cwd, ...args) =>
   execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+    env: { ...process.env, ...FIXTURE_GIT_ENV },
   });
 
 /**
@@ -125,8 +138,6 @@ function makeFixture() {
   w('secrets/fixture.private-key.pem', 'KEY-MATERIAL-V1\n');
 
   git(repo, 'init', '-q', '-b', 'main');
-  git(repo, 'config', 'user.email', 'test@example.com');
-  git(repo, 'config', 'user.name', 'test');
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'seed');
   git(repo, 'tag', 'runtime-v1');

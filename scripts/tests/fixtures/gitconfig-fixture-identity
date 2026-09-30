@@ -1,0 +1,25 @@
+# The committer identity for every throwaway git repo this test suite builds.
+#
+# It deliberately does NOT live in each fixture's own .git/config. A host-level
+# agent on macOS dev machines - Bold Agent, under /Library/Application Support -
+# watches for newly created repositories and appends its own
+#
+#   [include]
+#     path = .../bold_git_tools/config
+#
+# stanza to .git/config to install its core.hooksPath. It does that with a
+# read-modify-write of the whole file, so it races every `git config` write a
+# fixture makes in the first moments after `git init`: if its read happens
+# before our write and its write after, our value is silently dropped. That is
+# what produced APP-223 - `fatal: unable to auto-detect email address` at a
+# fixture's seed commit, roughly 1 run in 5, with a .git/config that still
+# existed and still held `user.name` but had lost `user.email` (email is
+# written first, so its window is the wider one).
+#
+# Identity we own in a file no repo ever writes to cannot be clobbered that way.
+# Point GIT_CONFIG_GLOBAL here instead of at /dev/null; do not re-introduce
+# `git config user.email` inside a fixture - tests/fixture-git-identity.test.mjs
+# fails the suite if you do.
+[user]
+	name = test
+	email = test@example.com
