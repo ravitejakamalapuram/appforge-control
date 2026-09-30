@@ -13,6 +13,12 @@
 // `main` and inert in production for days, and the only reason anyone found out
 // was a human noticing. This is the instrument for that.
 //
+// A `stale` finding carries the diff that produced it and a behavioural /
+// non-behavioural classification (APP-261). A comment-only change is reported
+// as `low` and routed as a note; everything the classifier cannot rule out
+// stays `high`. It never suppresses a finding, and `tampered` / `missing` /
+// `manifest_mismatch` stay `critical` whatever the delta looks like.
+//
 // Exit 0 = no drift; the provenance line is still printed (that is APP-137
 //          criterion 2 — the source commit belongs in every run log, clean or
 //          not). The sweep posts nothing on 0; the do-nothing rule applies.
@@ -119,6 +125,45 @@ async function digestAtCommit(repo, commit, relPath) {
   }
 }
 
+/** Text of a blob at a commit, or null when it cannot be read as text. */
+async function readBlobAtCommit(repo, commit, relPath) {
+  try {
+    const { stdout } = await run('git', ['-C', repo, 'cat-file', 'blob', `${commit}:${relPath}`], {
+      encoding: 'buffer',
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    // A blob with a NUL byte is binary; there is nothing to classify and
+    // nothing readable to put in the report, so the caller gets `unavailable`
+    // and the finding keeps its `high`.
+    if (stdout.includes(0)) return null;
+    return stdout.toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Unified diff of one path between two commits (APP-261).
+ *
+ * `git diff <a>..<b> -- <path>` reads history only, never the working tree,
+ * so this keeps the same shared-checkout safety the digest reads have. A
+ * failure returns null rather than throwing: a diff we cannot take is a
+ * classification we cannot make, which the classifier already answers with
+ * `unavailable` and therefore `high`.
+ */
+async function diffBetweenCommits(repo, from, to, relPath) {
+  try {
+    const { stdout } = await run(
+      'git',
+      ['-C', repo, 'diff', '--no-color', '--no-ext-diff', `${from}..${to}`, '--', relPath],
+      { maxBuffer: 32 * 1024 * 1024 },
+    );
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveCommit(repo, ref) {
   try {
     const { stdout } = await run('git', ['-C', repo, 'rev-parse', '--verify', `${ref}^{commit}`]);
@@ -172,6 +217,23 @@ async function main() {
     refTipDigests[entry.sourcePath] = await digestAtCommit(sourceRepo, refTipCommit, entry.sourcePath);
   }
 
+  // Only the paths that actually moved need a diff; taking one per versioned
+  // file on every sweep would spend eleven `git diff` calls to learn nothing.
+  const diffs = {};
+  if (refTipCommit !== manifest.sourceCommit) {
+    for (const entry of manifest.files) {
+      if (!entry.versioned || !entry.sourcePath) continue;
+      const atCommit = commitDigests[entry.sourcePath];
+      const atTip = refTipDigests[entry.sourcePath];
+      if (!atCommit || !atTip || atCommit === atTip) continue;
+      diffs[entry.sourcePath] = {
+        diffText: await diffBetweenCommits(sourceRepo, manifest.sourceCommit, refTipCommit, entry.sourcePath),
+        before: await readBlobAtCommit(sourceRepo, manifest.sourceCommit, entry.sourcePath),
+        after: await readBlobAtCommit(sourceRepo, refTipCommit, entry.sourcePath),
+      };
+    }
+  }
+
   const report = buildReport({
     manifest,
     installDigests,
@@ -179,6 +241,7 @@ async function main() {
     commitDigests,
     refTipCommit,
     refTipDigests,
+    diffs,
     installDir: args.installDir,
   });
 

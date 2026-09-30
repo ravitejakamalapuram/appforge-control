@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
   FALLBACK_SOURCE_PATHS,
+  LAUNCH_PATH_INSTALL_PATHS,
+  MAX_DIFF_LINES,
   buildReport,
   isUnversionedPath,
   parseReleaseManifest,
@@ -247,4 +249,218 @@ test('agent-launch.sh does not invoke the drift check', async () => {
   const launcher = await readFile(new URL('../agent-launch.sh', import.meta.url), 'utf8');
   assert.ok(!launcher.includes('detect-launcher-drift'),
     'wiring the drift check into launch would make one bad check kill every agent run (APP-132)');
+});
+
+// -- APP-261: the diff in the report, and behavioural classification ---------
+//
+// The defect these cover: every content change to a versioned launcher file
+// was `stale`/`high` and went to the CEO with two blob hashes and no diff. On
+// APP-226 that escalated a five-line `collateralNote` advice string under the
+// headline "Production is not running that fix", and the CEO had to read the
+// diff by hand to find the claim wrong. On APP-260 it escalated a
+// documentation-only edit to `config/github-apps.yaml` whose comment-stripped
+// content was byte-identical. An operator who watches that happen learns to
+// discount the check, which is how the APP-72 blind spot comes back.
+
+/**
+ * A one-file `stale` world: `bin/agent-launch.sh` is behind the ref tip, and
+ * the delta between the two revisions is whatever the caller passes.
+ *
+ * Only one manifest entry, so a `sourcePath` the caller picks to exercise a
+ * file type cannot collide with the fixture's other entry.
+ */
+function staleWorld({ before, after, diffText, sourcePath = 'scripts/agent-launch.sh', installPath = 'bin/agent-launch.sh' }) {
+  const m = manifest();
+  m.files = [{ ...m.files[0], installPath, sourcePath, sha256: INSTALLED }];
+  const world = cleanWorld({ manifest: m, refTipCommit: TIP });
+  world.refTipDigests[sourcePath] = MERGED;
+  world.diffs = { [sourcePath]: { before, after, diffText } };
+  return world;
+}
+
+const staleFinding = (world) => {
+  const report = buildReport(world);
+  const f = report.findings.find((x) => x.kind === 'stale');
+  assert.ok(f, 'the classifier must never make the finding disappear');
+  return { report, f };
+};
+
+test('a comment-only change is reported, with the diff, as low', () => {
+  const { report, f } = staleFinding(staleWorld({
+    sourcePath: 'config/github-apps.yaml',
+    before: 'apps:\n  appforge-agents:\n    installed_on:\n      - StellarTab\n',
+    after: 'apps:\n  appforge-agents:\n    # CAUTION (APP-251): not symmetric with deliberately_excluded.\n    installed_on:\n      - StellarTab\n',
+    diffText: [
+      '--- a/config/github-apps.yaml',
+      '+++ b/config/github-apps.yaml',
+      '@@ -1,4 +1,5 @@',
+      ' apps:',
+      '   appforge-agents:',
+      '+    # CAUTION (APP-251): not symmetric with deliberately_excluded.',
+      '     installed_on:',
+      '       - StellarTab',
+    ].join('\n'),
+  }));
+
+  assert.equal(f.classification, 'comment_only');
+  assert.equal(f.behavioural, false);
+  assert.equal(f.severity, 'low', 'a documentation edit must not be rated the same as an inert safety control');
+  assert.equal(report.shouldEscalate, false, 'a note, not a CEO escalation');
+
+  const md = renderReport(report);
+  assert.match(md, /Routing: note only/);
+  assert.match(md, /```diff/, 'the diff belongs in the report so severity is judged in place');
+  assert.match(md, /# CAUTION \(APP-251\)/);
+  assert.match(md, /The finding stands; only its severity moved/);
+});
+
+test('a logic change stays high and still escalates', () => {
+  const { report, f } = staleFinding(staleWorld({
+    sourcePath: 'scripts/lib/quota-retry-watchdog.mjs',
+    before: 'export function readRunIssueId(run) {\n  return run?.nativeIssueId ?? null;\n}\n',
+    after: 'export function readRunIssueId(run) {\n  return run?.contextSnapshot?.issueId ?? run?.nativeIssueId ?? null;\n}\n',
+    diffText: [
+      '--- a/scripts/lib/quota-retry-watchdog.mjs',
+      '+++ b/scripts/lib/quota-retry-watchdog.mjs',
+      '@@ -1,3 +1,3 @@',
+      ' export function readRunIssueId(run) {',
+      '-  return run?.nativeIssueId ?? null;',
+      '+  return run?.contextSnapshot?.issueId ?? run?.nativeIssueId ?? null;',
+      ' }',
+    ].join('\n'),
+  }));
+
+  assert.equal(f.classification, 'behavioural');
+  assert.equal(f.severity, 'high');
+  assert.equal(report.shouldEscalate, true);
+  assert.match(renderReport(report), /Routing: escalate/);
+});
+
+test('an unparseable diff fails toward high', () => {
+  // An unterminated literal means the scanner cannot say what is code and what
+  // is not. A false `low` reintroduces the blind spot; a false `high` costs a
+  // read, so uncertainty resolves upward.
+  const { report, f } = staleFinding(staleWorld({
+    sourcePath: 'scripts/agent-launch.sh',
+    before: "echo 'fine'\n",
+    after: "echo 'unterminated\n",
+    diffText: "--- a/scripts/agent-launch.sh\n+++ b/scripts/agent-launch.sh\n@@ -1 +1 @@\n-echo 'fine'\n+echo 'unterminated\n",
+  }));
+  assert.equal(f.classification, 'unparseable');
+  assert.equal(f.severity, 'high');
+  assert.equal(report.shouldEscalate, true);
+});
+
+test('a missing diff fails toward high rather than assuming it was harmless', () => {
+  const world = cleanWorld({ refTipCommit: TIP });
+  world.refTipDigests['scripts/agent-launch.sh'] = MERGED;
+  // No `diffs` at all — the git read failed, or the caller did not supply one.
+  const { report, f } = staleFinding(world);
+  assert.equal(f.classification, 'unavailable');
+  assert.equal(f.severity, 'high');
+  assert.equal(report.shouldEscalate, true);
+  assert.match(renderReport(report), /No diff available/);
+});
+
+test('a tampered file stays critical even when the delta is comment-only', () => {
+  // The classifier adjusts `stale` and nothing else. An unexplained hand-edit
+  // to the credential-bearing launcher tree is critical because it is
+  // unexplained, not because of what it touched.
+  const world = staleWorld({
+    sourcePath: 'config/github-apps.yaml',
+    before: 'apps:\n  appforge-agents: {}\n',
+    after: 'apps:\n  # a comment\n  appforge-agents: {}\n',
+    diffText: '--- a/config/github-apps.yaml\n+++ b/config/github-apps.yaml\n@@ -1,2 +1,3 @@\n apps:\n+  # a comment\n   appforge-agents: {}\n',
+  });
+  world.installDigests['bin/agent-launch.sh'] = EDITED;
+
+  const report = buildReport(world);
+  const tampered = report.findings.find((f) => f.kind === 'tampered');
+  assert.ok(tampered, 'the hand-edit is still reported');
+  assert.equal(tampered.severity, 'critical');
+  assert.equal(tampered.classification, undefined, 'the classifier must not touch a critical finding');
+  assert.equal(report.worstSeverity, 'critical');
+  assert.equal(report.shouldEscalate, true, 'a comment-only delta cannot talk a tampered file down');
+});
+
+test('the APP-226 case — an advice-string edit — no longer escalates to the CEO', () => {
+  const before = "  const collateralNote = ' Clear them yourself with the script.';\n";
+  const after = "  const collateralNote = ' This wake is task-bound, so you can clear them here.';\n";
+  const { report, f } = staleFinding(staleWorld({
+    sourcePath: 'scripts/quota-retry-watchdog.mjs',
+    before,
+    after,
+    diffText: `--- a/scripts/quota-retry-watchdog.mjs\n+++ b/scripts/quota-retry-watchdog.mjs\n@@ -1 +1 @@\n-${before.trimEnd()}\n+${after.trimEnd()}\n`,
+  }));
+  assert.equal(f.classification, 'prose_string_only');
+  assert.equal(f.severity, 'low');
+  assert.equal(report.shouldEscalate, false);
+});
+
+test('a flag swap inside a string literal is NOT talked down to low', () => {
+  // The blind spot a blanket "string literals are harmless" rule would open:
+  // `--dry-run` to `--force` changes no code skeleton at all.
+  const { f } = staleFinding(staleWorld({
+    sourcePath: 'scripts/quota-retry-watchdog.mjs',
+    before: "  run('git', ['push', '--dry-run']);\n",
+    after: "  run('git', ['push', '--force']);\n",
+    diffText: "--- a/scripts/quota-retry-watchdog.mjs\n+++ b/scripts/quota-retry-watchdog.mjs\n@@ -1 +1 @@\n-  run('git', ['push', '--dry-run']);\n+  run('git', ['push', '--force']);\n",
+  }));
+  assert.equal(f.classification, 'string_only');
+  assert.equal(f.behavioural, true);
+  assert.equal(f.severity, 'high');
+});
+
+test('a file type with no comment model is behavioural by default', () => {
+  const { f } = staleFinding(staleWorld({
+    sourcePath: 'scripts/package.json',
+    before: '{ "dependencies": { "yaml": "^2.5.0" } }\n',
+    after: '{ "dependencies": { "yaml": "^2.6.0" } }\n',
+    diffText: '--- a/scripts/package.json\n+++ b/scripts/package.json\n@@ -1 +1 @@\n-{ "dependencies": { "yaml": "^2.5.0" } }\n+{ "dependencies": { "yaml": "^2.6.0" } }\n',
+  }));
+  assert.equal(f.classification, 'unmodelled_filetype');
+  assert.equal(f.severity, 'high');
+});
+
+test('the diff carried in the report is bounded', () => {
+  const body = Array.from({ length: 200 }, (_, i) => `// line ${i}`).join('\n');
+  const { report, f } = staleFinding(staleWorld({
+    sourcePath: 'scripts/lib/github-app.mjs',
+    before: 'const a = 1;\n',
+    after: `${body}\nconst a = 2;\n`,
+    diffText: `--- a/x\n+++ b/x\n@@ -1 +1,201 @@\n-const a = 1;\n${body.split('\n').map((l) => `+${l}`).join('\n')}\n+const a = 2;\n`,
+  }));
+  assert.equal(f.diffTruncated, true);
+  assert.equal(f.diffHunks.split('\n').length, MAX_DIFF_LINES);
+  assert.ok(f.diffLineCount > MAX_DIFF_LINES);
+  assert.match(renderReport(report), new RegExp(`Truncated at ${MAX_DIFF_LINES} of ${f.diffLineCount} lines`));
+});
+
+test('findings record whether the file is on the launch path, without that moving severity', () => {
+  // Blast-radius context for the reader. It must not demote: a sweep script
+  // that stops recovering paused agents is a real failure, and demoting it
+  // because it cannot abort a launch would open a second blind spot beside
+  // the one this work closes.
+  assert.ok(LAUNCH_PATH_INSTALL_PATHS.has('bin/agent-launch.sh'));
+  assert.ok(!LAUNCH_PATH_INSTALL_PATHS.has('bin/quota-retry-watchdog.mjs'));
+
+  const world = cleanWorld();
+  world.installDigests['bin/agent-launch.sh'] = EDITED;
+  const [f] = buildReport(world).findings;
+  assert.equal(f.launchPath, true);
+  assert.equal(f.severity, 'critical', 'launch-path context is reported, not scored');
+});
+
+test('low sorts below medium so the escalating findings stay at the top', () => {
+  const world = staleWorld({
+    sourcePath: 'config/github-apps.yaml',
+    before: 'a: 1\n',
+    after: '# note\na: 1\n',
+    diffText: '--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n+# note\n a: 1\n',
+  });
+  world.installExtras = ['bin/extra.sh'];
+  const report = buildReport(world);
+  assert.deepEqual(report.findings.map((f) => f.severity), ['medium', 'low']);
+  assert.equal(report.worstSeverity, 'medium');
+  assert.equal(report.shouldEscalate, false);
 });

@@ -68,6 +68,39 @@ rm -rf ~/.appforge && mv ~/.appforge.prev ~/.appforge \
 The rollback needs that trailing `--secrets-only` pass because a deploy deletes
 `~/.appforge.prev/secrets` — see the private key section below.
 
+### Reading a `stale` finding (APP-261)
+
+A `stale` finding carries the `git diff` between the install commit and the ref
+tip, bounded at 80 lines, plus a classification of what changed:
+
+| classification | severity | what it means |
+| --- | --- | --- |
+| `comment_only` | `low` | comment-stripping both revisions yields identical bytes |
+| `prose_string_only` | `low` | identical code skeleton, every changed literal is multi-word prose |
+| `string_only` | `high` | identical skeleton, but a changed literal is a flag, path, URL or bare token |
+| `behavioural` | `high` | executable content changed |
+| `unmodelled_filetype` / `unavailable` / `unparseable` | `high` | the change could not be inspected |
+
+Everything uncertain resolves to `high`: a false `low` reintroduces the APP-72
+blind spot, a false `high` costs one read. Strings are only modelled for
+`.mjs`/`.js`; shell and YAML get comment detection and nothing else, because
+shell quoting and YAML's unquoted scalars are easy to model wrongly and a wrong
+model there produces a false `low`.
+
+The classifier **never suppresses a finding** and only ever touches `stale`.
+`tampered`, `missing` and `manifest_mismatch` stay `critical` whatever the
+delta looks like — an unexplained hand-edit to the credential-bearing launcher
+tree is serious because it is unexplained.
+
+Findings also record `launchPath`: whether `agent-launch.sh` execs or reads the
+file on every launch. That is blast-radius context for the reader and
+deliberately does **not** move severity. A sweep script that stops recovering
+paused agents is a real failure, and demoting it because it cannot abort a
+launch would open a second blind spot next to the one this closes.
+
+If a classification looks wrong, the hunks are in the report — say so, and the
+rule gets fixed rather than trusted.
+
 ## The layout invariant — do not flatten it
 
 `~/.appforge/` mirrors the repo's relative layout. It is not a flat `bin`

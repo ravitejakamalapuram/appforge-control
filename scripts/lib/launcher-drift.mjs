@@ -46,6 +46,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { classifyChange } from './launcher-diff-classify.mjs';
 
 /**
  * Install-relative path -> source-repo path, for manifests that do not record
@@ -94,7 +95,37 @@ export const FINDING_SEVERITY = Object.freeze({
   unmanaged: 'medium',
 });
 
-const SEVERITY_RANK = { critical: 0, high: 1, medium: 2 };
+const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+
+/**
+ * Install paths `agent-launch.sh` execs or reads on every agent launch.
+ *
+ * Reported alongside each finding as blast-radius context. It deliberately
+ * does NOT move severity. A sweep script that stops recovering paused agents
+ * is a real failure with a real cost, and demoting it because it cannot abort
+ * a launch would open a second blind spot next to the one APP-261 closes.
+ * Context for the reader, nothing more.
+ */
+export const LAUNCH_PATH_INSTALL_PATHS = Object.freeze(new Set([
+  'bin/agent-launch.sh',
+  'bin/prune-agent-worktrees.sh',
+  'bin/github-app-token.mjs',
+  'bin/lib/github-app.mjs',
+  'bin/package.json',
+  'bin/package-lock.json',
+  'config/github-apps.yaml',
+  '.gitconfig-appforge',
+]));
+
+/**
+ * Diff lines carried per `stale` finding before truncation.
+ *
+ * The point of the diff is that severity can be judged in place; the point of
+ * the bound is that one large merge cannot turn the sweep's comment into a
+ * wall nobody reads. Past the bound the report says how many lines it dropped
+ * and names the `git diff` that prints the rest.
+ */
+export const MAX_DIFF_LINES = 80;
 
 /** Severities that get their own escalation issue rather than a note on the sweep's issue. */
 export const ESCALATING_SEVERITIES = Object.freeze(new Set(['critical', 'high']));
@@ -173,7 +204,33 @@ export function isUnversionedPath(installPath) {
 }
 
 function finding(kind, installPath, detail, extra = {}) {
-  return { kind, severity: FINDING_SEVERITY[kind], installPath, detail, ...extra };
+  return {
+    kind,
+    severity: FINDING_SEVERITY[kind],
+    installPath,
+    launchPath: LAUNCH_PATH_INSTALL_PATHS.has(installPath),
+    detail,
+    ...extra,
+  };
+}
+
+/** Bound a unified diff for display, keeping the head and saying what was cut. */
+export function boundDiff(diffText, max = MAX_DIFF_LINES) {
+  if (typeof diffText !== 'string' || diffText.trim() === '') {
+    return { diffHunks: null, diffLineCount: 0, diffTruncated: false };
+  }
+  // The two `diff --git` / `index` preamble lines carry no content and eat
+  // budget; the `---`/`+++` pair is kept because it names both revisions.
+  const lines = diffText.replace(/\n$/, '').split('\n')
+    .filter((line) => !line.startsWith('diff --git ') && !line.startsWith('index '));
+  if (lines.length <= max) {
+    return { diffHunks: lines.join('\n'), diffLineCount: lines.length, diffTruncated: false };
+  }
+  return {
+    diffHunks: lines.slice(0, max).join('\n'),
+    diffLineCount: lines.length,
+    diffTruncated: true,
+  };
 }
 
 /**
@@ -187,6 +244,11 @@ function finding(kind, installPath, detail, extra = {}) {
  *   - `commitDigests`   source path -> sha256 of the blob at `manifest.sourceCommit`
  *   - `refTipCommit`    the commit `manifest.sourceRef` resolves to now, or null
  *   - `refTipDigests`   source path -> sha256 of the blob at `refTipCommit`
+ *   - `diffs`           source path -> `{ diffText, before, after }` between the
+ *                       two commits, used to carry the hunks in the report and
+ *                       to classify a `stale` change (APP-261). An absent or
+ *                       incomplete entry classifies as `unavailable`, which is
+ *                       behavioural, which stays `high`.
  *
  * A null digest means "not present at that commit", which is a finding in its
  * own right and not the same as "unchanged".
@@ -198,6 +260,7 @@ export function buildReport({
   commitDigests = {},
   refTipCommit = null,
   refTipDigests = {},
+  diffs = {},
   installDir = null,
   checkedAt = new Date().toISOString(),
 } = {}) {
@@ -249,9 +312,35 @@ export function buildReport({
         `\`${entry.sourcePath}\` has been removed from \`${manifest.sourceRef}\` since the install, but the file is still live.`,
         { sourcePath: entry.sourcePath, refTipCommit }));
     } else if (atTip !== atCommit) {
-      findings.push(finding('stale', entry.installPath,
+      // APP-261. Any content change used to be `high` and go to the CEO, with
+      // blob hashes and no diff, so a comment edit and a silently-inert safety
+      // control arrived looking the same. The classifier decides severity and
+      // routing only — it can never make the finding go away — and everything
+      // it cannot rule out stays `high`.
+      const delta = diffs[entry.sourcePath] ?? {};
+      const classified = classifyChange({
+        sourcePath: entry.sourcePath,
+        before: delta.before,
+        after: delta.after,
+        diffText: delta.diffText,
+      });
+      const bounded = boundDiff(delta.diffText);
+      const stale = finding('stale', entry.installPath,
         `merged but not deployed — \`${entry.sourcePath}\` changed on \`${manifest.sourceRef}\` after the install commit, and the live file is still the old one.`,
-        { sourcePath: entry.sourcePath, deployedDigest: atCommit, mergedDigest: atTip, sourceCommit: manifest.sourceCommit, refTipCommit }));
+        {
+          sourcePath: entry.sourcePath,
+          deployedDigest: atCommit,
+          mergedDigest: atTip,
+          sourceCommit: manifest.sourceCommit,
+          refTipCommit,
+          classification: classified.classification,
+          behavioural: classified.behavioural,
+          classificationLabel: classified.label,
+          classificationNote: classified.note,
+          ...bounded,
+        });
+      if (!classified.behavioural) stale.severity = 'low';
+      findings.push(stale);
     }
   }
 
@@ -328,15 +417,43 @@ export function renderReport(report) {
     lines.push('');
     lines.push(`- ${f.detail}`);
     if (f.sourcePath) lines.push(`- Source path: \`${f.sourcePath}\``);
+    lines.push(f.launchPath
+      ? '- Launch path: this file is exec\'d or read by `agent-launch.sh` on every agent launch.'
+      : '- Launch path: no — this file is not read at agent launch.');
     if (f.expected) lines.push(`- Expected \`${f.expected}\`, found \`${f.actual ?? 'nothing'}\`.`);
     if (f.deployedDigest) lines.push(`- Deployed blob \`${f.deployedDigest}\`, merged blob \`${f.mergedDigest}\`.`);
     if (f.manifestDigest) lines.push(`- RELEASE says \`${f.manifestDigest}\`, commit has \`${f.commitDigest}\`.`);
+
+    // APP-261: for a `stale` finding the diff is the evidence. Without it the
+    // reader has two hashes and has to go and run the diff by hand, which is
+    // what turned a five-line advice string into a CEO escalation on APP-226.
+    if (f.kind === 'stale') {
+      lines.push(`- Change: **${f.classificationLabel}** (\`${f.classification}\`) — ${f.classificationNote}`);
+      lines.push(f.behavioural
+        ? '- Severity: `high` — a behavioural change to a versioned launcher file that production is not running.'
+        : '- Severity: lowered `high` -> `low` by the diff classifier. Routed as a note, not an escalation. The finding stands; only its severity moved.');
+      lines.push('');
+      if (f.diffHunks) {
+        lines.push('```diff');
+        lines.push(f.diffHunks);
+        lines.push('```');
+        if (f.diffTruncated) {
+          lines.push(`_Truncated at ${MAX_DIFF_LINES} of ${f.diffLineCount} lines. Full diff:_ \`git -C ${report.sourceRepo} diff ${f.sourceCommit}..${f.refTipCommit} -- ${f.sourcePath}\``);
+        }
+      } else {
+        lines.push(`_No diff available._ Run \`git -C ${report.sourceRepo} diff ${f.sourceCommit}..${f.refTipCommit} -- ${f.sourcePath}\` by hand; the classifier had nothing to read, which is why this stayed \`high\`.`);
+      }
+    }
     lines.push('');
   }
 
   lines.push(report.shouldEscalate
     ? 'Routing: escalate — at least one finding is `critical` or `high`.'
-    : 'Routing: note only — no finding rose above `medium`.');
+    : `Routing: note only — no finding rose above \`${report.worstSeverity}\`.`);
+  if (report.findings.some((f) => f.kind === 'stale' && !f.behavioural)) {
+    lines.push('');
+    lines.push('A `stale` finding shown as `low` was classified non-behavioural from the diff above (APP-261). It is still real drift and production is still running the old file; it does not warrant a CEO escalation on its own. If the classifier looks wrong, the hunks are right there — say so, and the rule gets fixed rather than trusted.');
+  }
   lines.push('');
   lines.push('Detection only. Nothing was redeployed, rewritten, or reverted; remediation is a reviewed install from a named ref (APP-161), not an automatic action by this check.');
   return lines.join('\n');
