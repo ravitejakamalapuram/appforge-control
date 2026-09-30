@@ -170,3 +170,10 @@ another product's repo), `ci:read`.
 - If a task needs a fresh npm install (for example a Cloud Functions TypeScript project), say so in your
   comment and let GitHub Actions CI build and test it; never claim something was tested locally when it could
   not be.
+
+## Flutter / InvTrack
+- `flutter` lives in `/opt/homebrew/bin` (service PATH includes it since 2026-10-01; if `flutter` is "command not found",
+  call `/opt/homebrew/bin/flutter` and tell the CTO - the service env needs `infra/macos/apply-service-env.sh`).
+- A fresh worktree has no generated localization code (it is not committed). Before `flutter analyze` or `flutter test`
+  run `flutter pub get && flutter gen-l10n`, otherwise analyze reports dozens of false `app_localizations.dart` errors.
+  The exact CI command is the `test:` line in InvTrack's `release.yaml`; mirror it, do not invent a variant.
