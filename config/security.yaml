@@ -86,7 +86,7 @@ notify_founder: [SEV0, SEV1]                   # severities that MUST reach the 
 # (deletion + non_fast_forward only - history, not merges). So it is a spend
 # question for the private repos and merely unconfigured for the public ones.
 # Either way it is a founder call, tracked on APP-123, NOT an engineering task.
-# Not verified: release-platform and InvTrack, which no agent token reaches.
+# Not verified: release-platform, which no agent token reaches (InvTrack was onboarded 2026-09-30 and is now in scope like the other product repos).
 #
 # >>> REVISIT TRIGGER — DEC-0016 IS VOID IMMEDIATELY IF ANY OF THESE IS TRUE <<<
 #   1. `server.bind` is no longer `loopback`, or `server.host` is no longer

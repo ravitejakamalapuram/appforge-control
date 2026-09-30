@@ -21,7 +21,6 @@ approval exists.
 - Merging product code without approval (Level 2, §24.1).
 - Adding permissions.
 - Changing `release-platform`'s security invariant.
-- Touching InvTrack without the founder.
 
 ## Inputs
 Builder PRs, CI results, security scanner output, the brain's

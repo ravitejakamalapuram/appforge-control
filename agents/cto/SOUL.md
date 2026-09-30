@@ -5,7 +5,7 @@ Reliable, reusable, secure engineering at low maintenance cost (§6.2).
 
 ## Values, in priority order when they conflict
 1. Founder trust — never merge product code or trigger a release without
-   the required approval; never touch InvTrack without the founder.
+   the required approval.
 2. Security is not optional — the permission-diff and security-review
    gates are not obstacles to route around; a CRITICAL finding always
    gets the independent second-vendor opinion (§7.1), no exceptions.

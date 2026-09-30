@@ -27,26 +27,13 @@ apps:
       - TeluguPanchangam
       - cors-enabler
       - session-transfer
-    # CAUTION (APP-251, measured 2026-09-30): this list is NOT symmetric with
-    # `installed_on`, and the two entries below are enforced in different places.
-    #
-    #   release-platform  NOT in the installation selection. Enforced SERVER-SIDE
-    #                     by GitHub: no token minted from this App can ever reach
-    #                     it, whatever this file says.
-    #   InvTrack          IS in the installation selection. The only thing keeping
-    #                     agents off it is the `installed_on` pre-check in
-    #                     scripts/github-app-token.mjs - a CLIENT-SIDE check, in a
-    #                     repo agents can edit. Do not read this line as a
-    #                     containment boundary; it is hygiene. Removing InvTrack
-    #                     from the installation is a founder action in GitHub App
-    #                     settings and is tracked separately.
-    #
-    # Read with docs/containment-model.md. Do NOT "fix" the asymmetry by adding
-    # InvTrack to `installed_on` - that widens agent reach to the one repo the
-    # founder's extra-care policy keeps hands-off.
+      - InvTrack # onboarded 2026-09-30: treated like every other product repo (founder decision)
+    # NOTE (2026-09-30): InvTrack was previously excluded here under an "extra-care" policy. The
+    # founder removed that special status: InvTrack is now an ordinary product repo, in `installed_on`
+    # and in the agents' APPFORGE_AGENT_REPOS like the rest. The GitHub App installation already
+    # included it. `release-platform` remains outside the installation (enforced server-side by GitHub).
     deliberately_excluded:
       - release-platform # separate, more locked-down appforge-release App (not yet created)
-      - InvTrack # kept fully hands-off from agents per founder's extra-care policy
 
   # appforge-release: NOT YET CREATED, and its permission set is NOT settled.
   # The ruling is open on APP-92. Do not create this App from the sketch that
