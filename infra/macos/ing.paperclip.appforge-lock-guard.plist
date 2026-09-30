@@ -4,8 +4,6 @@
 <dict>
 	<key>EnvironmentVariables</key>
 	<dict>
-		<key>HEALTHCHECKS_PING_URL_PAPERCLIP</key>
-		<string>__HEALTHCHECKS_PING_URL_PAPERCLIP__</string>
 		<key>NTFY_TOPIC</key>
 		<string>__NTFY_TOPIC__</string>
 		<key>PATH</key>
@@ -14,24 +12,23 @@
 		<string>/Users/rkamalapuram</string>
 	</dict>
 	<key>WorkingDirectory</key>
-	<string>/Users/rkamalapuram/git-personal/appforge-control</string>
-	<key>ExitTimeOut</key>
-	<integer>300</integer>
+	<string>/Users/rkamalapuram</string>
 	<key>KeepAlive</key>
 	<false/>
 	<key>Label</key>
-	<string>ing.paperclip.appforge-sync</string>
+	<string>ing.paperclip.appforge-lock-guard</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/rkamalapuram/git-personal/appforge-control/infra/macos/sync.sh</string>
+		<string>/bin/bash</string>
+		<string>/Users/rkamalapuram/.appforge-ops/bin/paperclip-lock-guard.sh</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StartInterval</key>
-	<integer>1800</integer>
+	<integer>60</integer>
 	<key>StandardErrorPath</key>
-	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/sync.err.log</string>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/paperclip-lock-guard.err.log</string>
 	<key>StandardOutPath</key>
-	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/sync.log</string>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/paperclip-lock-guard.out.log</string>
 </dict>
 </plist>
