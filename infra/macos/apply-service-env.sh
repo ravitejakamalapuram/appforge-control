@@ -11,7 +11,8 @@
 #                        which is the work account on this laptop). The same
 #                        value is also in ~/.paperclip/instances/default/.env as
 #                        a backstop.
-#   PATH              -> includes ~/.local/bin so Paperclip can find `claude`.
+#   PATH              -> includes ~/.local/bin so Paperclip can find `claude`, and
+#                        /opt/homebrew/bin (last) so agents can find `flutter`.
 #
 # Auth model: agents use Paperclip's *unmanaged* claude_local path (no "AI
 # connection" bound). Paperclip then spawns the real `claude` CLI with this
@@ -24,7 +25,8 @@ LABEL="ing.paperclip.paperclipai"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 CLAUDE_DIR="$HOME/git-personal/appforge-control/.claude-appforge"
 CLAUDE_BIN="$HOME/.local/bin/claude"
-SVC_PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# /opt/homebrew/bin is LAST so nothing that resolves today changes; it is only there so Flutter (brew cask) is found.
+SVC_PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 EXPECTED_EMAIL="raviteja369.k@gmail.com"
 PB=/usr/libexec/PlistBuddy
 
