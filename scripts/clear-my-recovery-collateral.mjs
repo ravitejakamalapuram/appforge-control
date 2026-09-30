@@ -59,27 +59,43 @@
 //
 // `POST /api/issues/:id/recovery-actions/resolve` is a CROSS-ISSUE write, so it
 // is gated by `cross_issue_influence_run_context_required`. That gate wants the
-// run to be TASK-BOUND (`PAPERCLIP_TASK_ID` set), not just alive. The watchdog
-// resumes an agent with `paperclipai agent wake <agentId>` — an AGENT-level
-// wake. `POST /api/agents/:id/wakeup` has no issue/task field at all (checked
-// against the served OpenAPI), so the run it starts is always task-unbound:
-// `PAPERCLIP_TASK_ID` empty, scratch dir `paperclip-run-unassigned-*`. In that
-// run EVERY resolve 403s, and so does every `PATCH /api/issues/:id`.
+// run to be TASK-BOUND (`PAPERCLIP_TASK_ID` set), not just alive. A wake that
+// does not bind one produces a run where EVERY resolve 403s, and so does every
+// `PATCH /api/issues/:id`.
 //
 // Verified on run a520f601: sending `X-Paperclip-Run-Id` does not help (the
 // 403's own `sanctionedPath` tells you to send the header you already sent),
 // and neither does checking the issue out first. Checkout returns 200 and takes
 // the lock, but it does NOT bind write attribution.
 //
-// So the drain the watchdog describes cannot complete on the wake that
-// describes it. Rather than emit one confusing 403 per issue, `--resolve` now
-// refuses up front on a task-unbound run and reports what is pending. The
-// deadlock itself is a control-plane gap, tracked on APP-164:
+// CORRECTION (APP-181): an agent-level wake CAN be bound
+//
+// This header used to claim `POST /api/agents/:id/wakeup` "has no issue/task
+// field at all (checked against the served OpenAPI), so the run it starts is
+// always task-unbound". The OpenAPI reading was right and the conclusion was
+// wrong. The route's body is `wakeAgentSchema`, whose `payload` is a free-form
+// `z.record` — so no `issueId` key is *documented*, but the server reads one:
+//
+//   route (`routes/agents.js`)  wakePayload = req.body.payload -> heartbeat.wakeup
+//   `enqueueWakeup`             -> enrichWakeContextSnapshot({ payload })
+//   `enrichWakeContextSnapshot` payload.issueId ?? payload.taskId
+//                               -> contextSnapshot.issueId AND .taskId
+//   adapter `execute.js`        contextSnapshot.taskId ?? .issueId
+//                               -> env.PAPERCLIP_TASK_ID
+//
+// (traced through `@paperclipai/server` + `@paperclipai/adapter-claude-local`
+// 2026.916.1, the installed dist). So `paperclipai agent wake <agentId>
+// --payload '{"issueId":"<uuid>"}'` yields a task-bound run, and the watchdog
+// now sends exactly that (APP-181). `--resolve` is reachable from a watchdog
+// resume whenever the interrupted run had a recorded issue.
+//
+// It still refuses up front on a task-unbound run rather than emitting one
+// confusing 403 per issue, because two unbound wakes remain: a pending action
+// written by a pre-APP-181 watchdog build, and an interrupted run the runtime
+// never bound in the first place. The residual deadlock for those is tracked on
+// APP-164:
 //   pause cancellation -> sweep blocks the issues -> a blocked issue is never
 //   picked for a task-bound heartbeat -> the collateral can never be cleared.
-// The only issue-scoped wake that would break it is
-// `POST /api/issues/:id/monitor/check-now`, and arming that needs a PATCH,
-// which is itself 403 here.
 //
 // NEVER `release` A COLLATERAL ISSUE TO "CLEAN UP" A CHECKOUT
 //

@@ -199,6 +199,48 @@ Three corrections to how this first looked from inside the 409:
    carried `actorId`, `triggeredBy`, `originIdentityContextId`,
    `forceFreshSession`.
 
+### The continuation retry does not drop the binding — it inherits an absent one
+
+Corrected 2026-09-30 for [APP-181](/APP/issues/APP-181). The paragraph that used
+to sit here read the `47c79a69` / `a520f601` pair as *"a retry dispatched with no
+task binding at all — a retry that drops the binding and then takes checkouts is
+the thing to fix."* The pair is real; the causal direction is not.
+
+`a520f601` was **already unbound** — it is a watchdog quota-resume root, and the
+row above says so. `scheduleBoundedRetryForRun`
+(`@paperclipai/server/dist/services/heartbeat.js`) builds its retry snapshot as
+`withRecoveryContext({ ...contextSnapshot, retryOfRunId, wakeReason, … })`: it
+spreads the predecessor's whole snapshot, so it carries `issueId` forward
+whenever there is one. The continuation retry preserved the binding faithfully.
+There was none to preserve.
+
+Traced over the last 200 runs in this company, every unbound run is either a
+wake-time root or a descendant of one:
+
+| generation | count | wake reason |
+|---|---|---|
+| root | 7 | watchdog `provider_quota` resume / `process_lost` backoff (**ours**, fixed by APP-181) |
+| root | 1 | manual board wake with a free-text reason and no payload (`afe6ae4d`) |
+| descendant | 7 | `max_turns_continuation_retry`, `transient_failure_retry` — inherited, up to 3 deep |
+
+The deepest chain is `ab1b08a0` → `e8a41559` → `1e0a9b23` → `31a3f4ce`: one
+unbound wake, four unbound runs. That is the leverage — binding the root removes
+its whole subtree, and 14 of those 15 runs trace to a root we control.
+
+### Always pass the issue on a manual wake
+
+`afe6ae4d` is the one unbound root that is neither ours nor the platform's — a
+board wake whose reason text named the issue in prose (*"Re-push branch
+fix/APP-195-… and open the PR"*) while the payload carried nothing. The woken
+Builder got a run that could not `PATCH` the issue it was woken about.
+
+`paperclipai agent wake` takes `--payload`, and the server reads `issueId` out of
+it (chain traced in `scripts/clear-my-recovery-collateral.mjs`). A wake that names
+an issue should bind it:
+
+```sh
+paperclipai agent wake <agentRef> --reason '<text>' --payload '{"issueId":"<uuid>"}'
+```
 So "preserve task binding across retries" has no defect behind it on this
 evidence. The retry was bound exactly like the run it retried. The thing to fix
 is that an agent-scoped run can take an issue lock at all.
