@@ -45,3 +45,11 @@ took.
 
 The package name in both is suffixed `.SYNTHETIC` so it cannot be mistaken for
 the real InvTrack application id, which this repo does not yet know.
+
+## `play-vitals-SYNTHETIC.json`
+
+**Not a real Play Developer Reporting API pull.** It has the shape that
+`scripts/play-vitals.mjs` writes. Its rates are made up. The ANR series ends
+on the same day as the crash series but starts one day later, and one ANR
+value is an explicit `0`. So a test can check two things: `as_of` is the
+newest day both rates carry, and a real zero is recorded as `0`. APP-283.

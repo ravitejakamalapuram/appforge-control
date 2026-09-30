@@ -20,6 +20,9 @@
 //   node scripts/metrics-import.mjs --source play --item invtrack \
 //        --file <installs_overview.csv> [--package com.example.invtrack]
 //
+//   node scripts/metrics-import.mjs --source play_vitals --item invtrack \
+//        --file data/metrics/raw/play-vitals-<package>-<date>.json
+//
 // `cws` is the founder-session dashboard CSV (five fields). `cws_listing` is
 // the PUBLIC listing page (the two rating fields) — anonymous HTTPS, no
 // credential, no founder session, so it needs nothing provisioned.
@@ -38,6 +41,10 @@
 // consumes a FILE: the read-only service-account key is bound to the ingest
 // job and is never seen here.
 //
+// `play_vitals` is the file scripts/play-vitals.mjs writes after querying the
+// Play Developer Reporting API (crash and ANR rate). APP-283. Same split: the
+// runner holds the key and makes the call; this consumes its output file.
+//
 // `--exported-at` defaults to now, which is correct for a live pull. It is
 // settable so a manually dropped file (the cycle-one fallback) can record
 // when it was actually downloaded rather than when it was loaded.
@@ -52,6 +59,7 @@ import { parseCwsExport, headerProvenance } from './lib/cws-export.mjs';
 import { parseCwsListing, parseAttestedListing, listingProvenance } from './lib/cws-listing.mjs';
 import { parseGa4Report, ga4Provenance, buildRunReportRequest } from './lib/ga4-report.mjs';
 import { parsePlayReport, playProvenance } from './lib/play-report.mjs';
+import { parseVitalsRun } from './lib/play-vitals.mjs';
 import { createManifestEntry, appendManifest, sha256 } from './lib/metrics-manifest.mjs';
 
 function parseArgs(argv) {
@@ -73,7 +81,7 @@ export function runImport(args) {
   const dataRoot = args.data_root ?? 'data';
   const exportedAt = args.exported_at ?? new Date().toISOString();
 
-  if (!source) throw new Error('--source is required (cws | cws_listing | play | ga4)');
+  if (!source) throw new Error('--source is required (cws | cws_listing | play | play_vitals | ga4)');
   if (!itemId) throw new Error('--item is required (the store item id)');
   if (!file) throw new Error('--file is required');
 
@@ -83,7 +91,7 @@ export function runImport(args) {
   const rawBytes = readFileSync(file);
 
   const LISTING_SOURCES = new Set(['cws_listing', 'cws_listing_attested']);
-  const IMPLEMENTED = new Set(['cws', 'play', 'ga4', ...LISTING_SOURCES]);
+  const IMPLEMENTED = new Set(['cws', 'play', 'play_vitals', 'ga4', ...LISTING_SOURCES]);
   if (!IMPLEMENTED.has(source)) {
     throw new Error(
       `source "${source}" has no importer yet. Implemented: ` +
@@ -104,6 +112,13 @@ export function runImport(args) {
       exported_at: exportedAt,
       package: args.package ?? null,
     });
+  } else if (source === 'play_vitals') {
+    // `exported_at` is the run's own `fetched_at`: the reading is as of the
+    // pull, not of when it was loaded here.
+    parsed = {
+      ...parseVitalsRun(JSON.parse(rawBytes.toString('utf8')), { item_id: itemId }),
+      checksum: sha256(rawBytes),
+    };
   } else if (source === 'cws_listing_attested') {
     // `exported_at` comes from the attestation, not from the clock or a flag:
     // the reading is as of when it was CAPTURED, not when it was loaded here.
@@ -175,6 +190,19 @@ export function runImport(args) {
             package_names_verbatim: parsed.package_names_verbatim,
             encoding_detected: parsed.encoding_detected,
           }
+        : source === 'play_vitals'
+        ? {
+            package: parsed.package,
+            window: parsed.window,
+            api_metrics: parsed.api_metrics,
+            unit: parsed.unit,
+            // Recorded because a rate over a handful of users is noise; the
+            // runner's own verdict says so, and a reader should not have to
+            // re-run it to find out.
+            distinct_users: parsed.distinct_users,
+            verdicts: parsed.verdicts,
+            absent_metrics: parsed.absent_metrics,
+          }
         : LISTING_SOURCES.has(source)
         ? {
             // A structural zero, not a measured one — the listing carries no
@@ -204,6 +232,8 @@ export function runImport(args) {
         ? ga4Provenance(parsed)
         : source === 'play'
         ? playProvenance(parsed)
+        : source === 'play_vitals'
+        ? null
         : LISTING_SOURCES.has(source)
           ? listingProvenance(parsed)
           : headerProvenance(parsed),
@@ -252,7 +282,7 @@ function main() {
   // "from column" only makes sense for the CSV export; the listing has no
   // column to name and GA4 returns a dimension, not a column, so saying
   // "column" for either would misdescribe the provenance.
-  const NO_COLUMNS = new Set(['cws_public_listing', 'ga4_cws_property']);
+  const NO_COLUMNS = new Set(['cws_public_listing', 'ga4_cws_property', 'play_developer_reporting_api']);
   const asOfLabel = NO_COLUMNS.has(entry.source) ? 'from' : 'from column';
   console.log(`  as_of       ${entry.as_of}   (${asOfLabel} "${entry.as_of_source}")`);
   console.log(`  exported_at ${entry.exported_at}`);
@@ -301,6 +331,17 @@ function main() {
         console.log(`    ${w.metric}  (no "${w.event_name}" row on this date; ${w.reason_code})`);
       }
       console.log(`    why: ${provenance.withheld_rule.reason}`);
+    }
+    return;
+  }
+  if (args.source === 'play_vitals') {
+    console.log('Play vitals provenance (APP-283) - no credential read by this script:');
+    console.log(`  package          : ${entry.notes.package}`);
+    console.log(`  api metrics      : ${JSON.stringify(entry.notes.api_metrics)}  <- user-perceived, the rates Play's thresholds use`);
+    console.log(`  distinct users   : ${JSON.stringify(entry.notes.distinct_users)}`);
+    console.log(`  runner verdicts  : ${JSON.stringify(entry.notes.verdicts)}`);
+    if (entry.notes.absent_metrics.length) {
+      console.log(`  ABSENT           : ${entry.notes.absent_metrics.join(', ')}  <- no row on ${entry.as_of}; NOT recorded as zero`);
     }
     return;
   }

@@ -8,12 +8,13 @@
 //
 // Exit codes: 0 ok, 1 alert (crash/ANR breach or regression), 3 insufficient data, 2 error.
 // The key is read from PLAY_SA_KEY_FILE, used to mint a short-lived token, and never printed or
-// written anywhere. Output (no secrets) goes to stdout and data/metrics/raw/play-vitals-*.json.
+// written anywhere. Output (no secrets) goes to stdout and data/metrics/raw/play-vitals-*.json;
+// load it with `node scripts/metrics-import.mjs --source play_vitals --item <id> --file <that file>`.
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import jwt from 'jsonwebtoken';
-import { vitalsWindow, buildQuery, metricSetPath, parseRows, assessVitals, isoDate } from './lib/play-vitals.mjs';
+import { vitalsWindow, buildQuery, metricSetPath, parseRows, assessVitals, seriesFor, isoDate } from './lib/play-vitals.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCOPE = 'https://www.googleapis.com/auth/playdeveloperreporting';
@@ -88,9 +89,12 @@ try {
   const token = await accessToken();
   const results = {};
   for (const [kind, metric] of [['crash', 'userPerceivedCrashRate'], ['anr', 'userPerceivedAnrRate']]) {
-    const series = parseRows(await query(token, kind));
-    results[kind] = assessVitals(series, metric);
-    results[kind].days = series.length;
+    const rows = parseRows(await query(token, kind));
+    results[kind] = assessVitals(rows, metric);
+    results[kind].days = rows.length;
+    // The daily values themselves, so metrics-import --source play_vitals can
+    // record them even when the verdict is insufficient_data (APP-283).
+    results[kind].series = seriesFor(rows, metric);
   }
   const out = {
     package: pkg,
