@@ -351,3 +351,14 @@ old values; rewriting shared history under live agents is riskier than the leak 
 **Not covered here:** `backup.sh`, `sync.sh` and `digest-gate.sh` are still run from the shared
 checkout by their plists (the same "runs whatever branch is checked out" hazard the watchdog and
 launcher were moved off in APP-137/APP-164). Deploying them under `~/.appforge/bin` is a separate change.
+
+## play-vitals (daily Google Play crash/ANR check)
+
+`play-vitals.sh` + `ing.paperclip.appforge-play-vitals.plist` (LaunchAgent `ing.paperclip.appforge-play-vitals`,
+daily 09:10 local). Runs `scripts/play-vitals.mjs` from a detached worktree at `origin/main` for each package in
+`PLAY_VITALS_PACKAGES` (default InvTrack). Exit handling: ok and `insufficient_data` are logged only (too few users for
+Play to report vitals is not an all-clear, and not a failure); an **alert** opens ONE Paperclip issue for the CTO per
+data window and pushes via ntfy; a **failed check** pushes via ntfy and exits non-zero. The key is only a *path*
+(`PLAY_SA_KEY_FILE`); the job alone reads it. Install: `infra/macos/install-plists.sh play-vitals`. Preview:
+`infra/macos/play-vitals.sh --dry-run`. Tests: `scripts/tests/play-vitals-job.test.mjs`.
+

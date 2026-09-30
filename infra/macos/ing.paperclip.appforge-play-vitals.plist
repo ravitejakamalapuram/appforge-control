@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- PLAY_SA_KEY_FILE is a PATH to the read-only service-account key (mode 0600), never the key itself.
+		     Only this job holds it; no agent does (docs/metrics-ingest.md section 4). -->
+		<key>PLAY_SA_KEY_FILE</key>
+		<string>/Users/rkamalapuram/git-personal/.claude/secrets/play-readonly-ingest.json</string>
+		<key>PAPERCLIP_API_URL</key>
+		<string>http://127.0.0.1:3100</string>
+		<key>PAPERCLIP_COMPANY_ID</key>
+		<string>18b2b6ef-fbaa-48d1-acf4-168841c269ae</string>
+		<key>NTFY_TOPIC</key>
+		<string>__NTFY_TOPIC__</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/rkamalapuram</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control</string>
+	<key>ExitTimeOut</key>
+	<integer>300</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>ing.paperclip.appforge-play-vitals</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/infra/macos/play-vitals.sh</string>
+	</array>
+	<!-- RunAtLoad false: loading the agent (reboot, repair) must not call the API off-schedule. -->
+	<key>RunAtLoad</key>
+	<false/>
+	<!-- LOCAL time (Asia/Kolkata on this laptop). Play's daily data for a day lands about two days later, so once
+	     a day is plenty. 09:10 avoids the top-of-hour crowd. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>9</integer>
+		<key>Minute</key>
+		<integer>10</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/play-vitals.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/play-vitals.log</string>
+</dict>
+</plist>
