@@ -500,12 +500,23 @@ test('the first run reproduces config §10, product for product', { skip: havePr
   assert.equal(results.length, 9, 'all nine products are reported, one row each');
 
   // Every product, InvTrack included, must reproduce the outcome and reason code config §10 predicts.
+  // Collect every mismatch and assert once, so one failing run lists all drifted products (APP-269)
+  // instead of stopping at the first and hiding the rest.
+  const mismatches = [];
   for (const r of results) {
     const expected = REAL.products[r.product];
-    assert.ok(expected, `config §10 has no row for ${r.product}`);
-    assert.equal(r.outcome, expected.expected_outcome, `${r.product}: outcome`);
-    assert.ok(r.reason_codes.includes(expected.reason_code), `${r.product}: reason_code`);
+    if (!expected) {
+      mismatches.push(`${r.product}: config §10 has no row`);
+      continue;
+    }
+    if (r.outcome !== expected.expected_outcome) {
+      mismatches.push(`${r.product}: outcome ${r.outcome}, config expects ${expected.expected_outcome}`);
+    }
+    if (!r.reason_codes.includes(expected.reason_code)) {
+      mismatches.push(`${r.product}: reason_codes [${r.reason_codes}] lack config reason_code ${expected.reason_code}`);
+    }
   }
+  assert.deepEqual(mismatches, [], 'config §10 has drifted from the live product inputs');
   // and nothing reached a verdict
   assert.equal(results.filter((r) => ['SCALE', 'SUNSET', 'ITERATE', 'PAUSE'].includes(r.outcome)).length, 0);
 });
