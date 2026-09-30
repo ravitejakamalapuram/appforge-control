@@ -220,37 +220,157 @@ delegable and the founder leaves permanently. A8's implied *mechanism* does not.
 - Rotation: revoke in the founder's Google account, re-consent, replace the
   secret. The CWS opt-in is untouched by rotation.
 
-### 3.7 Status — what is done and what is not
+### 3.7 The importer — built, and the two halves it is split into
 
-The read path is **documented and decided**. It is **not provisioned**:
+APP-215. `--source ga4` is implemented and **no longer refuses**. It splits into
+a request half and a response half, and the split is the security property:
+
+```
+# 1. the request. No credential involved, so this is deterministic and testable.
+node scripts/metrics-import.mjs --source ga4 --emit-request \
+     --property <numeric property id> --start <YYYY-MM-DD> --end <YYYY-MM-DD>
+
+# 2. the ingest job POSTs that body with the bearer token it holds, saves the
+#    response, and hands the FILE over.
+
+# 3. the response.
+node scripts/metrics-import.mjs --source ga4 --item <item> \
+     --file <runReport-response.json> [--property <numeric property id>]
+```
+
+`scripts/lib/ga4-report.mjs` opens no socket, reads no credential and has no
+code path to one — the same structural guarantee `play-report.mjs` has, and the
+reason both were written to consume bytes rather than fetch them. §6.1 rule 4
+holds here by construction, not by discipline.
+
+Four decisions in it are worth reading before the first real response lands,
+because each is a place a careless import would produce a plausible wrong
+number.
+
+**A withheld day is `missing`, and this is the rule the file exists for.**
+§3.5 constraint 3, made mechanical. GA4 signals a de-identified combination by
+**omitting the row** — there is no flag, no null, no marker of any kind. So
+absence and zero are distinguishable *only* by row presence, and the parser
+records a value only when a row exists. Three cases, held apart by three
+fixtures and tests:
+
+| What GA4 returned | What lands | Why |
+|---|---|---|
+| no row for `install` on the `as_of` day | metric **absent** from `metrics`, and **named** in `notes.withheld_metrics` | freshness reads it `missing` — true |
+| `"0"` for `install` | `0` | a returned zero **is** a measurement |
+| no `rows` key at all | **nothing** — the import throws and writes no entry | no entry means `missing`, which is also true |
+
+The third is the one that looks like a bug and is not. Refusing to write is
+correct: there is no date to attribute the reading to, and an entry full of
+zeroes on an assumed date would be a fabrication on two counts.
+
+**`as_of` comes from the response's own `date` dimension**, never from the
+requested range — a range end is what we *asked for*, the dimension value is
+what GA4 *had*. GA4 returns it as `YYYYMMDD` and it is normalised. Rows GA4
+could not date (`(other)`, emitted past a cardinality limit) are reported in
+`notes.undated_rows` and contribute no value.
+
+**No aggregation of one quantity.** Values come from the `as_of` day only. One
+row per event name is not aggregation — each event is a different quantity —
+but two rows for the same `(date, eventName)` pair are **refused rather than
+summed**, because if that ever happens the query shape is not what we think it
+is and summing would hide it. The fixture's daily installs are 4, 6, 3 so a
+test can assert the emitted value is `3` and not the sum `13`.
+
+**GA4 is never the dashboard family.** `assertNotDashboardFamily` throws if
+this parser is ever made to emit `cws_installs`, `cws_listing_page_views` or
+`cws_weekly_users`. That is the `forbidden_aliases` ban (§3.5 constraint 2)
+enforced at the point of *emission* as well as downstream, so remapping
+`install` onto `cws_installs` to make `store_listing_conversion` "work" fails
+the import instead of silently corrupting EXP-0001's primary metric. There is a
+test that performs that edit and asserts the throw.
+
+Two smaller guards worth naming. The request builder **refuses a window older
+than 60 days**, because GA4 answers an out-of-retention request with an empty
+row set that is indistinguishable from total thresholding — better to fail on
+the request than to debug that from the response. And it **refuses a
+non-numeric property id**, because the CWS-created property is *named* with the
+extension id while the Data API takes the numeric id; that is the most likely
+first-attempt mistake and it would otherwise surface as a confusing 404.
+
+`notes.property_time_zone` is carried through verbatim. GA4 dates are in the
+property's reporting timezone, which the store set and Marketer cannot change,
+while `lag_days` is UTC calendar arithmetic — so a property ahead of UTC can
+legitimately produce an `as_of` that looks like tomorrow. Recorded so that is
+diagnosable rather than mysterious.
+
+Every mapping carries `confirmed: false`, and `notes.backfillable` is `false`
+on every entry. The fixtures are `*-SYNTHETIC.json` and were run against a
+scratch data root: **nothing synthetic entered `data/metrics/manifest.jsonl`.**
+
+### 3.7a Status — what is done and what is not
+
+**Code: done.** `--source ga4` imports; 24 tests in
+`scripts/tests/ga4-report.test.mjs` plus 5 end-to-end in
+`metrics-import.test.mjs`.
+
+**Provisioning: not done, and no agent can do it.**
 
 - the Store-listing **"Opt in to Google Analytics"** has not been clicked, so
   the GA4 property does not exist yet and has no numeric property id;
 - no OAuth client exists, no consent has been given, no secret is bound.
 
 Both need founder Developer Dashboard / Google account access.
-`scripts/metrics-import.mjs` therefore refuses `--source ga4` by name, with the
-reason, rather than writing a half-formed manifest entry. `ga4_install_events`
-and `ga4_listing_page_views` are declared in `config/portfolio.yaml` with
-`available_today: false` so the ban is in force before the first row arrives.
+
+`ga4_install_events` and `ga4_listing_page_views` therefore **stay
+`available_today: false`** in `config/portfolio.yaml`. This is deliberate and
+it is the one acceptance criterion on APP-215 that is not met: the flag means
+"readable today with nothing further provisioned", and until the opt-in is
+clicked and the token bound, setting it `true` would assert something false to
+every rule that reads it. It flips when — and only when — a real `runReport`
+against the real property returns rows. Flipping it is a one-line change gated
+on that evidence, not on this importer existing.
 
 Marking `install` as a key event is a Marketer capability and is presumably why
 CWS grants that role — but it is **not required** for this read path. Querying
 `eventCount` by `eventName` needs no conversion configuration, so the founder's
 only dashboard action is the opt-in itself.
 
+### 3.7b What the first real response has to settle
+
+Written down before the bytes arrive, so it cannot be graded on a curve
+afterwards. Any difference gets reported on APP-215 and APP-42, because each one
+falsifies something inferred without access:
+
+| Question | Second-hand expectation | How the response answers it |
+|---|---|---|
+| Install event name | `install` | appears in `notes.unmapped_events` if wrong |
+| Page-view event name | `page_view` | same |
+| Property timezone | unknown | `notes.property_time_zone`, from `metadata.timeZone` |
+| Does thresholding omit rows or return 0? | **omits** — the whole design rests on this | a day of single-digit installs returning `0` rather than no row would falsify §3.5 constraint 3 |
+| Retention really two months? | 60 days | a request at day 59 succeeding and day 61 returning nothing |
+| Does `install` fire without being a key event? | yes | rows present at all |
+
+Row four is the one to read twice. If CWS thresholding turns out to return a
+zero rather than omit the row, then **zeros from this source are untrustworthy**
+and the importer needs a different rule — that finding is more valuable than
+the convenience, and it is the reason the `withheld` and `zero` cases are
+separate fixtures rather than one.
+
 ### 3.8 Confidence, stated honestly
 
 - **Service account closed: HIGH.** Two verbatim documentation statements that
   compose deterministically. No live test could make Marketer able to manage
   users.
-- **OAuth user-credential path succeeds end to end: MEDIUM-HIGH.** Each link is
-  documented, but no property exists yet, so `runReport` has never been run
-  against a CWS-managed one. A store-managed property could in principle carry a
-  restriction not in the docs.
-- **First live attempt settles the remainder**, and it is one call. Whoever runs
-  it records the answer here either way — including a failure. That is the
-  lesson A8 cost us.
+- **OAuth user-credential path succeeds end to end: still MEDIUM-HIGH,
+  unchanged.** APP-215 built the importer but **could not run the live call**:
+  the property still does not exist, so `runReport` has never been executed
+  against a CWS-managed one. Nothing was learned that could move this number,
+  and it is left where APP-157 put it rather than nudged up because more code
+  now exists. Code is not evidence about someone else's API.
+- **Parser behaviour against the documented response shape: HIGH.** That is a
+  different and smaller claim than the one above, and it is the only thing the
+  24 tests establish. They prove the importer does the right thing with the
+  shape Google documents; they cannot prove the shape.
+- **First live attempt still settles the remainder**, and it is still one call —
+  now a copy-paste, via `--source ga4 --emit-request` (§3.7). Whoever runs it
+  records the answer on APP-215 either way, **including a failure**. That is the
+  lesson A8 cost us, and it is still outstanding.
 
 ---
 

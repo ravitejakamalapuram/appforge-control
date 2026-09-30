@@ -268,7 +268,14 @@ metrics:
     cadence: daily
     max_age_days: 14
     measurability: MEASURABLE_NOW
-    available_today: false     # opt-in not clicked; no property, no secret — APP-157 §3.7
+    # APP-215 built the importer; `--source ga4` no longer refuses. This flag is
+    # still false, and that is deliberate: it means "readable today with nothing
+    # further provisioned", and the Store-listing opt-in has not been clicked, so
+    # no property, no numeric property id and no bound token exist. Setting it
+    # true because code exists would assert something false to every rule that
+    # reads it. It flips when a real runReport against the real property returns
+    # rows — on that evidence, not on the importer. APP-215 §3.7a.
+    available_today: false
     definition_warning: |
       NOT `cws_installs`. This is the count of the CWS-emitted `install` custom
       event, which Google documents as "only sent if a user accepts the
@@ -286,7 +293,7 @@ metrics:
     cadence: daily
     max_age_days: 14
     measurability: MEASURABLE_NOW
-    available_today: false     # same gate as ga4_install_events — APP-157 §3.7
+    available_today: false     # same gate as ga4_install_events — APP-215 §3.7a
     definition_warning: |
       NOT `cws_listing_page_views`. This is GA4's `page_view` on the store
       listing as the store's GA4 integration emits it; the dashboard reports its

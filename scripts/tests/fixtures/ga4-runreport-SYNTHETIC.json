@@ -1,0 +1,16 @@
+{
+  "dimensionHeaders": [{ "name": "date" }, { "name": "eventName" }],
+  "metricHeaders": [{ "name": "eventCount", "type": "TYPE_INTEGER" }],
+  "rows": [
+    { "dimensionValues": [{ "value": "20260925" }, { "value": "page_view" }], "metricValues": [{ "value": "41" }] },
+    { "dimensionValues": [{ "value": "20260925" }, { "value": "install" }], "metricValues": [{ "value": "4" }] },
+    { "dimensionValues": [{ "value": "20260926" }, { "value": "page_view" }], "metricValues": [{ "value": "38" }] },
+    { "dimensionValues": [{ "value": "20260926" }, { "value": "install" }], "metricValues": [{ "value": "6" }] },
+    { "dimensionValues": [{ "value": "20260927" }, { "value": "page_view" }], "metricValues": [{ "value": "29" }] },
+    { "dimensionValues": [{ "value": "20260927" }, { "value": "install" }], "metricValues": [{ "value": "3" }] }
+  ],
+  "rowCount": 6,
+  "metadata": { "currencyCode": "USD", "timeZone": "America/Los_Angeles" },
+  "propertyQuota": null,
+  "kind": "analyticsData#runReport"
+}
