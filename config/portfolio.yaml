@@ -1398,19 +1398,23 @@ spec_defects:
 products:
   json-workbench:   { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown; the 2026-09-20 date carried in revision 1 was unsupported — see spec_defects.D4" }
   echokit:          { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown" }
-  stellartab:       { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown" }
-  session-transfer: { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown" }
+  stellartab:       { platform: chrome,  store_item_status: unpublished ,      first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "CWS dashboard 2026-09-30: v1.1.6 REJECTED, never live" }
+  session-transfer: { platform: chrome,  store_item_status: unpublished ,      first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "CWS dashboard 2026-09-30: approved, ready to publish before 29 Oct, not live yet" }
   telugupanchangam: { platform: chrome,  store_item_status: unpublished,    first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "awaiting free CWS slot (§13.6)" }
-  gitaverses:       { platform: chrome,  store_item_status: unpublished,    first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "awaiting free CWS slot (§13.6)" }
-  cors-enabler:     { platform: chrome,  store_item_status: draft,          first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "CWS item still draft" }
+  gitaverses:       { platform: chrome,  store_item_status: published   ,    first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "CWS dashboard 2026-09-30: Gita Wisdom New Tab is live (2 users); first_published unknown" }
+  cors-enabler:     { platform: chrome,  store_item_status: published   ,          first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "CWS dashboard 2026-09-30: CORS Enabler Engine is live (3 users); first_published unknown" }
   teleport:         { platform: android, store_item_status: internal_track, first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "Play internal track only; CWS target is an unpublished draft" }
   invtrack:         { platform: android, store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown; would also hit play_wau_unavailable on every WAU-written rule — see platform_rule_sets.android" }
 
 portfolio_note: |
-  Four of nine products are published with an unknown launch date and four
-  are not publicly launched at all, three of those behind the §13.6 two-slot
-  constraint. Measurement is not this portfolio's binding constraint; slots
-  are. That is a live board approval (APP-37) and is not re-litigated here.
+  Corrected 2026-09-30 against the live CWS dashboard (the earlier statuses were
+  inferred from repo files and four were wrong). Five products are published
+  with an unknown launch date (json-workbench, echokit, cors-enabler,
+  gitaverses on Chrome; invtrack on Play); StellarTab is rejected and
+  session-transfer is approved but not yet live; telugupanchangam is a draft.
+  The Chrome extension limit reads 5/5 and a request for more was declined for
+  low installs, so slots remain a constraint - but so does traffic: the whole
+  portfolio has under 20 CWS users. That is a live board matter (APP-37).
 
 # ===========================================================================
 # 11. Q4 GOAL BASELINE (O2)
