@@ -111,10 +111,15 @@ fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8") as f:
     f.write(text)
 PY
-# plutil(1) is macOS-only. install-plists.sh already guards it this way; this
-# installer did not, so it died outright wherever plutil is absent.
+# plutil(1) is macOS-only, and this installer's tests run on Linux CI too. Guarding
+# the call and skipping it (what install-plists.sh does) would mean no validation at
+# all off-macOS; python3 is already a hard dependency of this script (see above), and
+# its plistlib reads the same XML plist format, so it stands in without adding one.
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$tmp" >/dev/null || die "rendered plist failed plutil -lint"
+else
+  python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$tmp" >/dev/null \
+    || die "rendered plist did not parse as a property list (plistlib)"
 fi
 install -m 0600 "$tmp" "$PLIST_DST"
 chmod 600 "$PLIST_DST"

@@ -120,8 +120,15 @@ PY
   # (python exits non-zero on leftovers; set -e aborts before any install.)
   for name in ${filled[@]+"${filled[@]}"}; do unset "APPFORGE_PLIST_VAL_$name"; done
 
+  # plutil is macOS-only, and this installer's tests run on Linux CI too. Guarding
+  # the call and skipping it would mean no validation at all off-macOS; python3 is
+  # already a hard dependency of this script (see above), and its plistlib reads
+  # the same XML plist format, so it stands in without adding one.
   if command -v plutil >/dev/null 2>&1; then
     plutil -lint "$WORK/$label.plist" >/dev/null || die "rendered $label.plist failed plutil -lint"
+  else
+    python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$WORK/$label.plist" >/dev/null \
+      || die "rendered $label.plist did not parse as a property list (plistlib)"
   fi
   echo "ok   $label  fills: ${filled[*]:-(no secrets, installed as-is)}"
 done

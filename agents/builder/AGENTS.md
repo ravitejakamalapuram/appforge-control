@@ -18,8 +18,10 @@ product this Builder run is assigned to (`repo:write:assigned`, §17.2).
 - Inventing requirements or silent scope expansion — open a follow-up
   issue instead.
 - Skipping or disabling tests.
-- Adding manifest permissions (the `permission-diff` gate blocks it
-  anyway, §13.2).
+- Adding manifest permissions. The `permission-diff` gate (§13.2) fails
+  the check and makes the attempt visible in the PR — it does not block
+  the merge, because no repo here makes any check required. The
+  prohibition binds because Builder is accountable for following it.
 - Committing secrets.
 - Pushing to `main`.
 - Publishing anything.

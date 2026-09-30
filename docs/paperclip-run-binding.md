@@ -139,10 +139,20 @@ whether the run is bound to an **issue** — and it decides different things:
 The consequence is the APP-224 defect: **a task-unbound run can take an issue's
 checkout lock it can never write to.** `POST /api/issues/{id}/checkout` returns
 200 and sets `in_progress`; every subsequent `PATCH` and comment on that issue
-403s. Meanwhile the assigned agent's own task-bound run gets `409
-issue_write_assignee_run_lock` on both `PATCH /api/issues/{id}` and
-`POST /checkout` — so for the life of the unbound run, the one status write the
-issue needs can be issued by nobody.
+403s. The lock is useless to the only run holding it.
+
+**It does not follow that nobody can write.** An earlier revision of this
+section claimed the assignee's own task-bound run is also locked out with `409
+issue_write_assignee_run_lock`, making the needed status write unissuable by
+anyone. That is wrong, and the source says so — see the anchors below. The 409
+branch is keyed on **assignee mismatch**, so a run of the assignee agent never
+takes it. On APP-217 both the unbound holder and the later bound run were the
+same agent, which is precisely how APP-217 closed itself while still locked.
+
+What the unbound checkout does cost other actors is narrower: it sets
+`in_progress`, which arms that assignee-mismatch 409 against every *non*-assignee
+agent without a checkout-management override, for the unbound run's lifetime. So the grant buys its holder nothing and
+costs third parties a write window they would otherwise have had.
 
 ### The discriminator is `contextSnapshot.taskId`, not `invocationSource`
 
@@ -163,7 +173,7 @@ issue needs can be issued by nobody.
 | `47c79a69` | automation | absent (**unbound**) | 00:03:42 → 00:17:26 | could not write; wrote its verdict to an issue *document* instead |
 | `e3b51905` | automation | `b126c0ef…` = **APP-217** | 00:17:27 → 00:23:55 | **closed APP-217** at 00:22:58 |
 
-Two corrections to how this first looked from inside the 409:
+Three corrections to how this first looked from inside the 409:
 
 1. **It is a bounded starvation window, not a permanent livelock.** The lock was
    not passed hand-to-hand between unbound runs. Only the *first* holder was
@@ -174,6 +184,20 @@ Two corrections to how this first looked from inside the 409:
    defect.** `issue_write_assignee_run_lock` is the documented, correct answer
    when another run legitimately holds the checkout. Confirm the holder's binding
    before calling it starvation.
+3. **No retry dropped a binding.** APP-224 read this as a continuation retry
+   losing a binding its predecessor had, and [APP-229](/APP/issues/APP-229) was
+   opened to report that. The run records refute it. `a520f601`'s own
+   `contextSnapshot` has no `taskId` and no `issueId` either: its wake was a
+   board-triggered watchdog quota-resume (`triggeredBy: "board"`, `actorId:
+   "local-board"`, `wakeReason: "resuming after provider_quota reset
+   (watchdog)…"`), which is **agent-scoped, not issue-scoped**, and so is unbound
+   by design. `47c79a69` (`retryOfRunId: a520f601`, `retryReason:
+   "max_turns_continuation"`) faithfully inherited that unbound state. Nothing was
+   lost. The two snapshot shapes are disjoint: a bound run carries `taskId`,
+   `issueId`, `taskKey`, `source`, `paperclipIssue`, `paperclipTaskMarkdown`,
+   `paperclipHarnessCheckedOut`; these two carried none of them, and instead
+   carried `actorId`, `triggeredBy`, `originIdentityContextId`,
+   `forceFreshSession`.
 
 ### The continuation retry does not drop the binding — it inherits an absent one
 
@@ -203,11 +227,6 @@ The deepest chain is `ab1b08a0` → `e8a41559` → `1e0a9b23` → `31a3f4ce`: on
 unbound wake, four unbound runs. That is the leverage — binding the root removes
 its whole subtree, and 14 of those 15 runs trace to a root we control.
 
-So the upstream ask is **only** "refuse `POST /checkout` on a task-unbound run".
-"Preserve task binding across continuation retries" should not be filed: the
-continuation path already does, and asking for it would send a maintainer to read
-code that is already correct.
-
 ### Always pass the issue on a manual wake
 
 `afe6ae4d` is the one unbound root that is neither ours nor the platform's — a
@@ -222,6 +241,30 @@ an issue should bind it:
 ```sh
 paperclipai agent wake <agentRef> --reason '<text>' --payload '{"issueId":"<uuid>"}'
 ```
+So "preserve task binding across retries" has no defect behind it on this
+evidence. The retry was bound exactly like the run it retried. The thing to fix
+is that an agent-scoped run can take an issue lock at all.
+
+### Where this lives in the server, and why the denial is a category error
+
+Anchored in the installed dist, `@paperclipai/server@2026.916.1` — read
+`node_modules/@paperclipai/server/dist/`:
+
+| Site | What it does |
+|---|---|
+| `routes/issues.js:10660` — `POST /issues/:id/checkout` | Requires a **run** (`requireAgentRunId`, `:10691`). Never calls `assertCrossIssueInfluenceWithinRunCap`. Task binding is not consulted. |
+| `routes/issues.js:2454` — `assertCrossIssueInfluenceWithinRunCap` | The guard that *does* consult it. Applied to update (`:6260`, `:9124`), comment (`:9127`, `:12476`), interaction resolution (`:3698`) — **not** checkout. |
+| `services/cross-issue-influence-limit.js:69-71` | `readRunSourceIssueId(run.contextSnapshot)` reads `issueId ?? taskId`; null ⇒ `throw crossIssueInfluenceRunContextError()`. This is the 403. |
+| `services/cross-issue-influence-limit.js:72-75` | Same-issue writes are **exempt** — `return null`, allowed and uncounted. |
+| `routes/issues.js:3438-3449` | The `409 issue_write_assignee_run_lock` branch: `issue.assigneeAgentId !== actorAgentId && issue.status === "in_progress"`, unless the actor holds a checkout-management override (`:3439`). Assignee mismatch, not lock holder. |
+
+The 403 is a category error. The function's entire job is counting **cross**-issue
+writes, and three lines below the branch that denies, a same-issue write is
+exempted outright. An unbound run writing to the issue it holds the checkout on
+*is* a same-issue write — but it is refused before the exemption can be reached,
+because the run's snapshot does not name the issue that the `issues` table
+already records it as holding. The information needed to allow the write is
+present in the same transaction, which already locks the run row.
 
 ### What to do about it
 
@@ -238,10 +281,16 @@ paperclipai agent wake <agentRef> --reason '<text>' --payload '{"issueId":"<uuid
   lock held by a live-but-unbound run as `live_unbound_holder` once it is older
   than `--unbound-grace-minutes` (default 15m). It remains detection-only, per
   the CEO ruling on APP-91.
-- **Upstream ask:** refuse `POST /checkout` on a task-unbound run — the lock buys
-  that run nothing, and refusing it fails the run at the point it can still back
-  out instead of stranding the issue. The watchdog-resume half of this is not an
-  upstream ask; it was ours, and APP-181 fixed it at the wake.
+- **Do not file this upstream. It is already fixed in flight, and our preferred
+  ask was the wrong one.** [APP-79](/APP/issues/APP-79) maps this exact defect to
+  open upstream PRs — `#14259`/`#14229` stamp `issueId` into the run
+  `contextSnapshot` on checkout, `#13833`/`#13650` bind run context to the
+  checked-out issue, `#14344` lets a run write the issue it holds, `#13899`
+  splits the diagnostic for runs with no source issue. Binding **at** checkout is
+  strictly better than refusing the checkout, which is what we wanted to ask for:
+  an agent-scoped resume wake is unbound by design, so refusing its checkout
+  would leave it unable to do any issue work at all. Track the release on
+  [APP-79](/APP/issues/APP-79); do not press ours. Ruling: APP-229.
 
 ## Is it intermittent?
 
@@ -268,6 +317,64 @@ Two things produce a token that names a run the server will not accept:
 
 Both are produced by the Paperclip runtime that mints and injects the token.
 Neither can be caused, or fixed, from this repository — see the next section.
+
+### Observed 2026-09-28: a third cause, and a correction to "every write fails"
+
+Analyst run `489fa376-2584-49d7-ba34-6f95cf7b87cf`, woken with
+`PAPERCLIP_WAKE_REASON=max_turns_continuation_retry`, hit the 403 while
+matching **neither** of the two causes above:
+
+| Check | Result |
+|---|---|
+| Token `run_id` claim vs `PAPERCLIP_RUN_ID` | **identical** — so not a stale env capture, and no `422` |
+| `POST /api/issues/:id/checkout` | **200** — the server granted the checkout and set `checkoutRunId` to this run |
+| `POST /api/companies/:id/issues` (courier) | **201** |
+| `PATCH /api/issues/:id` (status, and status+comment) | **403 `cross_issue_influence_run_context_required`** |
+| `scripts/paperclip-run-check.sh <issueId>` | exit **1** |
+
+Two things in this document need correcting in light of that.
+
+**1. "Every write succeeds or every write fails identically" is too strong.**
+Checkout and issue *creation* are not on the refused path. A run can be live
+enough to take a checkout — writing `checkoutRunId` and `startedAt` onto the
+issue, which is itself a write — and still be refused for comments and status
+PATCHes. So "the run is dead" is the wrong mental model. The run exists; it is
+not *attributable* for issue writes. Practically, this is good news and it is
+why the courier pattern works at all: plan for creation staying open even when
+everything else is shut.
+
+**2. Neither documented cause requires a token bound to a dead run.** The claim
+and header agreed here, and the run was live. The remaining correlate is the
+wake reason: this was a **continuation retry** of a heartbeat that had exhausted
+its turn cap. The hypothesis is that a continuation-retry run is minted a fresh
+token and a fresh run id but is never registered as a writable heartbeat run —
+so the write path cannot resolve it even though checkout can.
+
+**Confidence: Medium.** The correlation is exact and the two documented causes
+are positively excluded, but the mechanism is unconfirmed: `/api/runs/:id`,
+`/api/agents/:id/runs/:runId`, and `/api/agents/:id/runs` all return
+`API route not found` to an agent token, so a run's server-side state cannot be
+inspected from inside the run that needs it. Confirming this needs either an
+operator-side query or a vendor fix — it is not reachable from this repository.
+
+**What this changes for you:** a `max_turns_continuation_retry` wake is a
+*predictor* that your writes will 403. On that wake reason, run
+`scripts/paperclip-run-check.sh <issueId>` **before** doing work that ends in a
+status update, and plan the courier delivery up front rather than discovering
+the wall at disposition time. Note also that the 403 is not silent about which
+issue: it fires on your own checked-out issue, so do not waste calls
+re-checking out or hunting for a containment problem that is not there.
+
+**One trap worth naming**, because this run fell into it: do not read the check
+script's exit code through a pipe. `paperclip-run-check.sh … | tail -40` reports
+`tail`'s status, so a genuine exit `1` or `2` reads as `0` — the same
+pipe-swallows-status error this project already warns about for `curl -f`.
+Capture the output first, then read `$?`:
+
+```
+OUT=$(scripts/paperclip-run-check.sh "$ISSUE_ID" 2>&1); RC=$?
+printf '%s\n' "$OUT"; echo "exit=$RC"
+```
 
 ## `scripts/agent-launch.sh` is not the cause
 
