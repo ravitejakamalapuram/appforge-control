@@ -8,7 +8,15 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const JOB = join(HERE, '..', '..', 'infra', 'macos', 'play-vitals.sh');
-const git = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe' });
+// Fixture git identity and isolation (APP-223): the identity comes from a file no repo writes to, and nothing
+// ambient (the launcher's GIT_CONFIG_KEY_n pairs, system config) reaches a hermetic local repo.
+const FIXTURE_GITCONFIG = join(HERE, 'fixtures', 'gitconfig-fixture-identity');
+const FIXTURE_GIT_ENV = {
+  GIT_CONFIG_GLOBAL: FIXTURE_GITCONFIG,
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_CONFIG_COUNT: '0',
+};
+const git = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe', env: { ...process.env, ...FIXTURE_GIT_ENV } });
 
 /** A throwaway repo whose scripts/play-vitals.mjs is a stub, plus a fake curl that records the POST body. */
 function fixture({ stubExit, stubJson }) {
@@ -18,7 +26,6 @@ function fixture({ stubExit, stubJson }) {
   mkdirSync(origin);
   git(origin, 'init', '--bare', '-q', '-b', 'main');
   git(root, 'clone', '-q', origin, repo);
-  git(repo, 'config', 'user.email', 't@t'); git(repo, 'config', 'user.name', 't');
   mkdirSync(join(repo, 'scripts'), { recursive: true });
   writeFileSync(join(repo, 'scripts', 'play-vitals.mjs'),
     `console.log(${JSON.stringify(JSON.stringify(stubJson))}); process.exit(${stubExit});\n`);
@@ -31,7 +38,7 @@ function fixture({ stubExit, stubJson }) {
   chmodSync(join(bin, 'curl'), 0o755);
   const key = join(root, 'key.json'); writeFileSync(key, '{}');
   const env = {
-    PATH: `${bin}:${process.env.PATH}`, HOME: root, APPFORGE_REPO: repo, APPFORGE_NODE: process.execPath,
+    ...FIXTURE_GIT_ENV, PATH: `${bin}:${process.env.PATH}`, HOME: root, APPFORGE_REPO: repo, APPFORGE_NODE: process.execPath,
     APPFORGE_STATE_DIR: join(root, 'state'), PLAY_SA_KEY_FILE: key,
     PAPERCLIP_API_URL: 'http://127.0.0.1:1', PAPERCLIP_COMPANY_ID: 'co-1', PLAY_VITALS_PACKAGES: 'com.example.app',
     NTFY_TOPIC: 'test-topic',
