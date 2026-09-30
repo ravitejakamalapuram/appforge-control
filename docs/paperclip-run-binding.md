@@ -226,6 +226,64 @@ Two things produce a token that names a run the server will not accept:
 Both are produced by the Paperclip runtime that mints and injects the token.
 Neither can be caused, or fixed, from this repository — see the next section.
 
+### Observed 2026-09-28: a third cause, and a correction to "every write fails"
+
+Analyst run `489fa376-2584-49d7-ba34-6f95cf7b87cf`, woken with
+`PAPERCLIP_WAKE_REASON=max_turns_continuation_retry`, hit the 403 while
+matching **neither** of the two causes above:
+
+| Check | Result |
+|---|---|
+| Token `run_id` claim vs `PAPERCLIP_RUN_ID` | **identical** — so not a stale env capture, and no `422` |
+| `POST /api/issues/:id/checkout` | **200** — the server granted the checkout and set `checkoutRunId` to this run |
+| `POST /api/companies/:id/issues` (courier) | **201** |
+| `PATCH /api/issues/:id` (status, and status+comment) | **403 `cross_issue_influence_run_context_required`** |
+| `scripts/paperclip-run-check.sh <issueId>` | exit **1** |
+
+Two things in this document need correcting in light of that.
+
+**1. "Every write succeeds or every write fails identically" is too strong.**
+Checkout and issue *creation* are not on the refused path. A run can be live
+enough to take a checkout — writing `checkoutRunId` and `startedAt` onto the
+issue, which is itself a write — and still be refused for comments and status
+PATCHes. So "the run is dead" is the wrong mental model. The run exists; it is
+not *attributable* for issue writes. Practically, this is good news and it is
+why the courier pattern works at all: plan for creation staying open even when
+everything else is shut.
+
+**2. Neither documented cause requires a token bound to a dead run.** The claim
+and header agreed here, and the run was live. The remaining correlate is the
+wake reason: this was a **continuation retry** of a heartbeat that had exhausted
+its turn cap. The hypothesis is that a continuation-retry run is minted a fresh
+token and a fresh run id but is never registered as a writable heartbeat run —
+so the write path cannot resolve it even though checkout can.
+
+**Confidence: Medium.** The correlation is exact and the two documented causes
+are positively excluded, but the mechanism is unconfirmed: `/api/runs/:id`,
+`/api/agents/:id/runs/:runId`, and `/api/agents/:id/runs` all return
+`API route not found` to an agent token, so a run's server-side state cannot be
+inspected from inside the run that needs it. Confirming this needs either an
+operator-side query or a vendor fix — it is not reachable from this repository.
+
+**What this changes for you:** a `max_turns_continuation_retry` wake is a
+*predictor* that your writes will 403. On that wake reason, run
+`scripts/paperclip-run-check.sh <issueId>` **before** doing work that ends in a
+status update, and plan the courier delivery up front rather than discovering
+the wall at disposition time. Note also that the 403 is not silent about which
+issue: it fires on your own checked-out issue, so do not waste calls
+re-checking out or hunting for a containment problem that is not there.
+
+**One trap worth naming**, because this run fell into it: do not read the check
+script's exit code through a pipe. `paperclip-run-check.sh … | tail -40` reports
+`tail`'s status, so a genuine exit `1` or `2` reads as `0` — the same
+pipe-swallows-status error this project already warns about for `curl -f`.
+Capture the output first, then read `$?`:
+
+```
+OUT=$(scripts/paperclip-run-check.sh "$ISSUE_ID" 2>&1); RC=$?
+printf '%s\n' "$OUT"; echo "exit=$RC"
+```
+
 ## `scripts/agent-launch.sh` is not the cause
 
 `scripts/agent-launch.sh` mints a GitHub App installation token and then
