@@ -54,7 +54,7 @@
 // Log: logs/quota-retry-watchdog.log (every detection, parse, pause,
 // resume, wake, and backoff decision — plain appended lines, one per
 // action, so `tail -f` during an incident is legible without jq).
-import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
@@ -85,7 +85,14 @@ import {
   formatBoardOnlyReport,
   pausedRunIdsFromState,
 } from './lib/quota-pause-collateral.mjs';
-import { notifierConfigFromEnv, pingPassSucceeded, alertPassFailed } from './lib/watchdog-notify.mjs';
+import {
+  notifierConfigFromEnv,
+  pingPassSucceeded,
+  alertPassFailed,
+  notifyRecovered,
+  planFailureAlert,
+  planRecovery,
+} from './lib/watchdog-notify.mjs';
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -220,8 +227,14 @@ function loadState(stateFile) {
 function saveState(stateFile, state) {
   mkdirSync(dirname(stateFile), { recursive: true });
   const tmp = `${stateFile}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n');
-  renameSync(tmp, stateFile);
+  try {
+    writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n');
+    renameSync(tmp, stateFile);
+  } catch (err) {
+    // Do not leave a half-written or orphaned .tmp next to the real file.
+    rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 // -- Paperclip HTTP API (read-only: run + agent listing) ------------------
@@ -648,6 +661,57 @@ export async function runOnce(args, { log, recordError = () => {} }) {
   return state;
 }
 
+// -- pass reporting (APP-103; throttled per the PR #14 review) --------------
+
+// Where the alert throttle's record lives: beside the state file, but separate
+// from it, because the state file is only written by a pass that got far
+// enough to save -- and a pass that threw is exactly the one that must alert.
+function alertStateFileFor(stateFile) {
+  return `${stateFile.replace(/\.json$/, '')}-alerts.json`;
+}
+
+function readAlertState(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    // Missing or unreadable reads as "not currently failing", so the next
+    // failure pushes. Losing the record can cost a duplicate alert, never a
+    // missed one.
+    return null;
+  }
+}
+
+/**
+ * Reports one finished pass: `failure` is null for a healthy pass, otherwise
+ * a one-line reason. The healthchecks.io ping (success or `/fail`) goes out
+ * every pass; the ntfy push is throttled by `planFailureAlert`, so a
+ * persistent failure is one push and then at most hourly, not one per 90s.
+ * Never throws: monitoring must not become an availability failure.
+ */
+export async function reportPassOutcome(notifier, { failure }, { alertStateFile, nowMs = Date.now(), fetchFn = fetch, log }) {
+  const prev = readAlertState(alertStateFile);
+  let next;
+  if (failure) {
+    const plan = planFailureAlert(prev, { nowMs, reason: failure });
+    next = plan.next;
+    if (!plan.push) {
+      log?.(`NOTIFY ntfy push suppressed (same failure as ${Math.round((nowMs - next.lastPushAtMs) / 60_000)}min ago; repeats at most hourly)`);
+    }
+    await alertPassFailed(notifier, failure, { fetchFn, log, push: plan.push });
+  } else {
+    const plan = planRecovery(prev);
+    next = plan.next;
+    await pingPassSucceeded(notifier, { fetchFn, log });
+    if (plan.push) await notifyRecovered(notifier, { fetchFn, log, suppressed: prev?.suppressed || 0 });
+  }
+  if (!notifier.enabled) return;
+  try {
+    saveState(alertStateFile, next);
+  } catch (err) {
+    log?.(`NOTIFY could not persist alert state (${err.message}); the next failure will push again`);
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const log = makeLogger(args.logFile);
@@ -658,6 +722,7 @@ async function main() {
   // founder/operator step because launchd does not source `.envrc`), so an
   // un-provisioned watchdog still does its real job without crashing.
   const notifier = notifierConfigFromEnv(process.env);
+  const alertStateFile = alertStateFileFor(args.stateFile);
   const errors = [];
   const recordError = (message) => {
     errors.push(message);
@@ -670,7 +735,7 @@ async function main() {
   } catch (err) {
     log(`FATAL ${err.stack || err.message}`);
     process.exitCode = 1;
-    await alertPassFailed(notifier, `pass threw: ${err.message}`, { log });
+    await reportPassOutcome(notifier, { failure: `pass threw: ${err.message}` }, { alertStateFile, log });
     log('--- pass failed ---');
     return;
   }
@@ -682,12 +747,12 @@ async function main() {
     // stuck-agent case this whole issue is about. Alert, and deliberately do
     // NOT send the success ping, so the healthchecks.io check goes red.
     process.exitCode = 1;
-    await alertPassFailed(notifier, `${errors.length} error(s): ${errors.join('; ')}`, { log });
+    await reportPassOutcome(notifier, { failure: `${errors.length} error(s): ${errors.join('; ')}` }, { alertStateFile, log });
     log(`--- pass complete with ${errors.length} error(s) ---`);
     return;
   }
 
-  await pingPassSucceeded(notifier, { log });
+  await reportPassOutcome(notifier, { failure: null }, { alertStateFile, log });
   log('--- pass complete ---');
 }
 

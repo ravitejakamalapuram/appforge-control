@@ -12,6 +12,10 @@ import {
   notifierConfigFromEnv,
   pingPassSucceeded,
   alertPassFailed,
+  notifyRecovered,
+  planFailureAlert,
+  planRecovery,
+  ALERT_REPEAT_MS,
 } from '../lib/watchdog-notify.mjs';
 
 function recordingFetch(impl) {
@@ -145,4 +149,75 @@ test('a null/undefined reason does not produce a "undefined" alert or a crash', 
   const fetchFn = recordingFetch();
   await alertPassFailed(cfg, null, { fetchFn });
   assert.ok(fetchFn.calls[0].body.includes('unknown failure'));
+});
+
+// ---------------------------------------------------------------------------
+// Throttling (PR #14 review). The watchdog runs every 90s, so an unthrottled
+// alert on a persistent failure is ~960 phone pushes a day -- which trains
+// the reader to mute the channel, i.e. the alert stops working exactly when
+// the failure is persistent enough to matter.
+// ---------------------------------------------------------------------------
+
+const HC_NTFY = { healthcheckUrl: 'https://hc-ping.com/test-uuid', ntfyTopic: 'test-topic-not-a-real-value', enabled: true };
+
+test('planFailureAlert: the first failure pushes', () => {
+  const { push, next } = planFailureAlert(null, { nowMs: 1_000, reason: 'resume CTO failed' });
+  assert.equal(push, true);
+  assert.equal(next.failing, true);
+  assert.equal(next.lastPushAtMs, 1_000);
+});
+
+test('planFailureAlert: the same failure on the next pass does NOT push again, and counts what it suppressed', () => {
+  let state = planFailureAlert(null, { nowMs: 0, reason: 'resume CTO failed: resume was due 40min ago' }).next;
+  for (let pass = 1; pass <= 10; pass += 1) {
+    const r = planFailureAlert(state, { nowMs: pass * 90_000, reason: `resume CTO failed: resume was due ${40 + pass}min ago` });
+    assert.equal(r.push, false, `pass ${pass}: a changing duration is not a new failure`);
+    state = r.next;
+  }
+  assert.equal(state.suppressed, 10);
+});
+
+test('planFailureAlert: a persistent failure re-pushes at most once per repeat interval', () => {
+  let state = planFailureAlert(null, { nowMs: 0, reason: 'x' }).next;
+  let pushes = 1;
+  for (let t = 90_000; t <= 24 * 3_600_000; t += 90_000) {
+    const r = planFailureAlert(state, { nowMs: t, reason: 'x' });
+    if (r.push) pushes += 1;
+    state = r.next;
+  }
+  assert.equal(ALERT_REPEAT_MS, 3_600_000);
+  assert.ok(pushes <= 25, `expected <= 25 pushes in 24h, got ${pushes}`);
+  assert.ok(pushes >= 24, 'but it must keep reminding while the failure persists');
+});
+
+test('planFailureAlert: a DIFFERENT failure pushes immediately, even inside the repeat interval', () => {
+  const state = planFailureAlert(null, { nowMs: 0, reason: 'resume CTO failed' }).next;
+  assert.equal(planFailureAlert(state, { nowMs: 90_000, reason: 'pass threw: ECONNREFUSED' }).push, true);
+});
+
+test('planRecovery: pushes once only when a failure streak ends, and resets so the next failure alerts at once', () => {
+  assert.equal(planRecovery(null).push, false, 'healthy -> healthy is silent');
+  const failing = planFailureAlert(null, { nowMs: 0, reason: 'x' }).next;
+  const rec = planRecovery(failing);
+  assert.equal(rec.push, true);
+  assert.equal(planRecovery(rec.next).push, false);
+  assert.equal(planFailureAlert(rec.next, { nowMs: 1, reason: 'x' }).push, true);
+});
+
+test('alertPassFailed with push:false still pings /fail but sends no ntfy', async () => {
+  const fetchFn = recordingFetch();
+  await alertPassFailed(HC_NTFY, 'x', { fetchFn, push: false });
+  assert.deepEqual(fetchFn.calls.map((c) => c.url), ['https://hc-ping.com/test-uuid/fail']);
+});
+
+test('notifyRecovered pushes one ntfy message and never throws; no-op without a topic', async () => {
+  const fetchFn = recordingFetch();
+  await notifyRecovered(HC_NTFY, { fetchFn, suppressed: 3 });
+  assert.equal(fetchFn.calls.length, 1);
+  assert.match(fetchFn.calls[0].url, /ntfy\.sh/);
+  assert.match(fetchFn.calls[0].body, /recovered/);
+  const none = recordingFetch();
+  await notifyRecovered({ healthcheckUrl: null, ntfyTopic: null, enabled: false }, { fetchFn: none });
+  assert.equal(none.calls.length, 0);
+  await assert.doesNotReject(notifyRecovered(HC_NTFY, { fetchFn: async () => { throw new Error('offline'); } }));
 });

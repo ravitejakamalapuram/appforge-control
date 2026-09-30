@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
-import { runOnce } from '../quota-retry-watchdog.mjs';
+import { runOnce, reportPassOutcome } from '../quota-retry-watchdog.mjs';
 import { quotaWaste } from '../lib/session-burn.mjs';
 
 function fakeFetchJson(payload) {
@@ -742,4 +742,68 @@ test('APP-181 x APP-103: the force-resume wake is task-bound and carries the col
   assert.match(wake, /APP-998/, 'and name the pause collateral, same as the due-fire path');
   assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP WAKE agent=CTO') && l.includes(`issue=${issueId}`)));
   assert.equal(finalState.pausedAgents['agent-cto'], undefined);
+});
+
+// ---------------------------------------------------------------------------
+// PR #14 review: alert throttling end to end, across separate passes. Each
+// pass is a fresh process, so the throttle only works if its record survives
+// on disk between calls -- which is what these exercise.
+// ---------------------------------------------------------------------------
+
+function recordingFetch() {
+  const calls = [];
+  const fn = async (url, opts) => {
+    calls.push({ url, body: opts?.body });
+    return { ok: true, status: 200 };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+const NOTIFIER = { healthcheckUrl: 'https://hc-ping.com/test-uuid', ntfyTopic: 'test-topic-not-a-real-value', enabled: true };
+const ntfyCalls = (f) => f.calls.filter((c) => c.url.includes('ntfy.sh'));
+
+test('reportPassOutcome: a persistent failure pushes once, not every 90s pass; hc /fail still goes out every pass', async () => {
+  const alertStateFile = join(mkdtempSync(join(tmpdir(), 'watchdog-alert-')), 'alerts.json');
+  const fetchFn = recordingFetch();
+  for (let pass = 0; pass < 40; pass += 1) {
+    await reportPassOutcome(NOTIFIER, { failure: `1 error(s): resume CTO failed (due ${pass}min ago)` }, {
+      alertStateFile, nowMs: 1_000_000 + pass * 90_000, fetchFn, log: () => {},
+    });
+  }
+  assert.equal(ntfyCalls(fetchFn).length, 1, '40 passes (1h) of the same failure is one phone push');
+  assert.equal(fetchFn.calls.filter((c) => c.url.endsWith('/fail')).length, 40);
+
+  // Recovery: one success ping, one recovery push that says what was suppressed.
+  await reportPassOutcome(NOTIFIER, { failure: null }, { alertStateFile, nowMs: 5_000_000, fetchFn, log: () => {} });
+  const pushes = ntfyCalls(fetchFn);
+  assert.equal(pushes.length, 2);
+  assert.match(pushes[1].body, /recovered/);
+  assert.match(pushes[1].body, /39 repeat alert/);
+  assert.ok(fetchFn.calls.some((c) => c.url === 'https://hc-ping.com/test-uuid'), 'healthy pass pings success');
+});
+
+test('reportPassOutcome: an unwritable alert-state file never breaks reporting (fails toward alerting)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'watchdog-alert-'));
+  const fetchFn = recordingFetch();
+  // A directory where the file should be: every read and write of it fails.
+  await assert.doesNotReject(
+    reportPassOutcome(NOTIFIER, { failure: 'x' }, { alertStateFile: dir, nowMs: 1, fetchFn, log: () => {} }),
+  );
+  assert.equal(ntfyCalls(fetchFn).length, 1, 'with no readable record, the failure is treated as new and pushed');
+});
+
+test('saveState: a failed rename removes the .tmp file instead of leaving it behind', async () => {
+  const { mkdirSync, existsSync } = await import('node:fs');
+  // The state-file path is an existing directory: the .tmp write succeeds,
+  // the rename onto a directory fails.
+  const stateFile = join(mkdtempSync(join(tmpdir(), 'watchdog-state-')), 'state.json');
+  mkdirSync(stateFile);
+  await assert.rejects(
+    withFakeFetch(
+      [['/heartbeat-runs', []], ['/agents', []]],
+      () => runOnce({ ...RUN_ARGS, dryRun: false, stateFile }, { log: () => {} }),
+    ),
+  );
+  assert.equal(existsSync(`${stateFile}.tmp`), false, 'a stale .tmp must not be left next to the state file');
 });

@@ -105,8 +105,11 @@ export async function pingPassSucceeded(config, { fetchFn = fetch, log, timeoutM
  * a ping body and ntfy messages are pushed to a phone — a full stack trace
  * is in `logs/quota-retry-watchdog.log`, the alert only has to say enough to
  * send the reader there.
+ *
+ * `push: false` skips the ntfy half only -- see `planFailureAlert` for why
+ * the phone push is throttled but the healthchecks.io `/fail` ping is not.
  */
-export async function alertPassFailed(config, reason, { fetchFn = fetch, log, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function alertPassFailed(config, reason, { fetchFn = fetch, log, timeoutMs = DEFAULT_TIMEOUT_MS, push = true } = {}) {
   const text = String(reason ?? 'unknown failure').slice(0, 900);
   const results = [];
   if (config.healthcheckUrl) {
@@ -120,7 +123,7 @@ export async function alertPassFailed(config, reason, { fetchFn = fetch, log, ti
       }),
     );
   }
-  if (config.ntfyTopic) {
+  if (config.ntfyTopic && push) {
     results.push(
       await bestEffort(`https://ntfy.sh/${config.ntfyTopic}`, {
         body: `AppForge quota watchdog pass failed: ${text}`,
@@ -132,4 +135,73 @@ export async function alertPassFailed(config, reason, { fetchFn = fetch, log, ti
     );
   }
   return results.some(Boolean);
+}
+
+// -- alert throttling (PR #14 review) ----------------------------------------
+//
+// The watchdog runs every 90s. Pushing on every failed pass turns one stuck
+// resume into ~960 phone notifications a day, and a channel that noisy gets
+// muted -- so the alert stops working exactly when the failure has lasted long
+// enough to matter. The rule: push on the first failure, on a change in what
+// is failing, and otherwise at most once per ALERT_REPEAT_MS while it persists;
+// push once more when it recovers.
+//
+// Only the ntfy push is throttled. The healthchecks.io `/fail` ping still goes
+// out every failed pass: it is not a phone push, healthchecks.io itself only
+// notifies on up/down transitions, and it keeps the check red.
+//
+// These are pure functions over a small persisted record, because each pass is
+// a fresh process; `main` in ../quota-retry-watchdog.mjs owns the file.
+
+export const ALERT_REPEAT_MS = 3_600_000;
+
+/**
+ * What identifies "the same failure" across passes. Digits are normalised
+ * away because the messages carry durations and counts ("resume was due
+ * 41min ago") that change every pass without the fault changing; agent and
+ * run ids are stable per fault, so they stay.
+ */
+function failureSignature(reason) {
+  return String(reason ?? '').replace(/\d+/g, '#');
+}
+
+/**
+ * Decides whether this failed pass pushes, and returns the record to persist.
+ * `prev` is the previous record, or null/undefined when there is none.
+ */
+export function planFailureAlert(prev, { nowMs, reason, repeatMs = ALERT_REPEAT_MS }) {
+  const signature = failureSignature(reason);
+  const continuing = Boolean(prev?.failing);
+  const push =
+    !continuing ||
+    prev.signature !== signature ||
+    !(Number.isFinite(prev.lastPushAtMs) && nowMs - prev.lastPushAtMs < repeatMs);
+  return {
+    push,
+    next: {
+      failing: true,
+      signature,
+      sinceMs: continuing && Number.isFinite(prev.sinceMs) ? prev.sinceMs : nowMs,
+      lastPushAtMs: push ? nowMs : prev.lastPushAtMs,
+      suppressed: push ? 0 : (prev.suppressed || 0) + 1,
+    },
+  };
+}
+
+/** A healthy pass: push a recovery notice only if a failure streak just ended. */
+export function planRecovery(prev) {
+  return { push: Boolean(prev?.failing), next: { failing: false } };
+}
+
+/** One ntfy push saying the watchdog is healthy again. Never throws. */
+export async function notifyRecovered(config, { fetchFn = fetch, log, timeoutMs = DEFAULT_TIMEOUT_MS, suppressed = 0 } = {}) {
+  if (!config.ntfyTopic) return false;
+  const tail = suppressed > 0 ? ` (${suppressed} repeat alert(s) were suppressed while it was failing)` : '';
+  return bestEffort(`https://ntfy.sh/${config.ntfyTopic}`, {
+    body: `AppForge quota watchdog recovered: passes are healthy again${tail}`,
+    fetchFn,
+    timeoutMs,
+    log,
+    label: 'ntfy recovery notice',
+  });
 }
