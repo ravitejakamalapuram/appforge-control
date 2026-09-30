@@ -26,6 +26,8 @@ NODE_BIN="${APPFORGE_NODE:-/opt/homebrew/bin/node}"
 PACKAGES="${PLAY_VITALS_PACKAGES:-com.invtracker.inv_tracker}"
 CTO_ID="${PLAY_VITALS_ASSIGNEE:-3cba1fb3-21e1-4851-832b-95de5247bff1}"
 INVTRACK_PROJECT="${PLAY_VITALS_PROJECT:-122db053-1f31-4add-b77c-db5061c82140}"
+# package=item pairs for the manifest import (a package with no entry here is checked but not imported).
+ITEMS="${PLAY_VITALS_ITEMS:-com.invtracker.inv_tracker=invtrack}"
 STATE_DIR="${APPFORGE_STATE_DIR:-$REPO/state}"
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -72,6 +74,24 @@ for pkg in $PACKAGES; do
   # The runner writes its JSON result into the WORKTREE's data/ dir; keep a copy in the real repo.
   mkdir -p "$REPO/data/metrics/raw"
   cp "$WT"/data/metrics/raw/play-vitals-"$pkg"-*.json "$REPO/data/metrics/raw/" 2>/dev/null || true
+  # Record the readings in the metrics manifest whenever the runner produced a file (any verdict except a hard
+  # failure). An empty Play window is expected while an app is below Play's vitals volume: log it, never fail.
+  if [ "$RC" != "2" ]; then
+    ITEM=""
+    for pair in $ITEMS; do [ "${pair%%=*}" = "$pkg" ] && ITEM="${pair#*=}"; done
+    RUNFILE="$(ls -t "$REPO"/data/metrics/raw/play-vitals-"$pkg"-*.json 2>/dev/null | head -1)"
+    if [ -n "$ITEM" ] && [ -n "$RUNFILE" ]; then
+      IMP="$(cd "$WT" && "$NODE_BIN" scripts/metrics-import.mjs --source play_vitals --item "$ITEM" --file "$RUNFILE" --data-root "$REPO/data" 2>&1)"
+      IRC=$?
+      if [ "$IRC" = "0" ]; then
+        log "imported $pkg into the manifest as $ITEM"
+      elif printf '%s' "$IMP" | grep -q "no crash or ANR rows"; then
+        log "no vitals rows yet for $pkg - nothing imported (an empty window is not a rate of zero)"
+      else
+        log "FAIL manifest import for $pkg: $(printf '%s' "$IMP" | head -2 | tr '\n' ' ')"; notify "manifest import failed for $pkg"; worst=1
+      fi
+    fi
+  fi
   case "$RC" in
     0) log "ok $pkg" ;;
     3) log "insufficient_data $pkg (too few users for Play to report vitals) - not an all-clear" ;;

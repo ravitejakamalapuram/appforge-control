@@ -19,7 +19,7 @@ const FIXTURE_GIT_ENV = {
 const git = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe', env: { ...process.env, ...FIXTURE_GIT_ENV } });
 
 /** A throwaway repo whose scripts/play-vitals.mjs is a stub, plus a fake curl that records the POST body. */
-function fixture({ stubExit, stubJson }) {
+function fixture({ stubExit, stubJson, importExit = 0, importMsg = 'ok' }) {
   const root = mkdtempSync(join(tmpdir(), 'pv-job-'));
   const origin = join(root, 'origin.git');
   const repo = join(root, 'repo');
@@ -28,7 +28,14 @@ function fixture({ stubExit, stubJson }) {
   git(root, 'clone', '-q', origin, repo);
   mkdirSync(join(repo, 'scripts'), { recursive: true });
   writeFileSync(join(repo, 'scripts', 'play-vitals.mjs'),
-    `console.log(${JSON.stringify(JSON.stringify(stubJson))}); process.exit(${stubExit});\n`);
+    `import { mkdirSync, writeFileSync } from 'node:fs';
+mkdirSync('data/metrics/raw', { recursive: true });
+writeFileSync('data/metrics/raw/play-vitals-com.example.app-2026-09-28.json', '{}');
+console.log(${JSON.stringify(JSON.stringify(stubJson))}); process.exit(${stubExit});\n`);
+  writeFileSync(join(repo, 'scripts', 'metrics-import.mjs'),
+    `import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(join(root, 'import.args'))}, process.argv.slice(2).join(' ') + '\\n');
+console.log(${JSON.stringify(importMsg)}); process.exit(${importExit});\n`);
   git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'stub'); git(repo, 'push', '-q', 'origin', 'HEAD:main');
   mkdirSync(join(repo, 'scripts', 'node_modules'), { recursive: true });
   const bin = join(root, 'bin');
@@ -41,9 +48,9 @@ function fixture({ stubExit, stubJson }) {
     ...FIXTURE_GIT_ENV, PATH: `${bin}:${process.env.PATH}`, HOME: root, APPFORGE_REPO: repo, APPFORGE_NODE: process.execPath,
     APPFORGE_STATE_DIR: join(root, 'state'), PLAY_SA_KEY_FILE: key,
     PAPERCLIP_API_URL: 'http://127.0.0.1:1', PAPERCLIP_COMPANY_ID: 'co-1', PLAY_VITALS_PACKAGES: 'com.example.app',
-    NTFY_TOPIC: 'test-topic',
+    NTFY_TOPIC: 'test-topic', PLAY_VITALS_ITEMS: 'com.example.app=exampleitem',
   };
-  return { root, repo, env, posts };
+  return { root, repo, env, posts, importArgs: join(root, 'import.args') };
 }
 
 const run = (env, ...args) => spawnSync('bash', [JOB, ...args], { env, encoding: 'utf8' });
@@ -92,4 +99,42 @@ test('dry-run calls nothing and opens nothing', () => {
   const r = run(f.env, '--dry-run');
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(existsSync(f.posts), false);
+});
+
+test('a successful run is imported into the manifest under the mapped item id', () => {
+  const f = fixture({ stubExit: 0, stubJson: { window: { end: '2026-09-28' } } });
+  const r = run(f.env);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /imported com.example.app into the manifest as exampleitem/);
+  const args = readFileSync(f.importArgs, 'utf8');
+  assert.match(args, /--source play_vitals --item exampleitem --file .*play-vitals-com\.example\.app-2026-09-28\.json --data-root /);
+});
+
+test('insufficient data is still imported (the series is the point), quietly', () => {
+  const f = fixture({ stubExit: 3, stubJson: { window: { end: '2026-09-28' } } });
+  const r = run(f.env);
+  assert.equal(r.status, 0);
+  assert.match(readFileSync(f.importArgs, 'utf8'), /--item exampleitem/);
+});
+
+test('an empty Play window is a quiet "not yet", never a failure and never a zero', () => {
+  const f = fixture({ stubExit: 3, stubJson: {}, importExit: 1, importMsg: 'play_vitals: Play returned no crash or ANR rows for com.example.app in 2026-09-15..2026-09-28; nothing imported' });
+  const r = run(f.env);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /no vitals rows yet/);
+  assert.equal(existsSync(f.posts), false, 'no notification for an expected empty window');
+});
+
+test('any other import failure is loud', () => {
+  const f = fixture({ stubExit: 0, stubJson: {}, importExit: 1, importMsg: 'play_vitals: file is not a play-vitals run' });
+  const r = run(f.env);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /FAIL manifest import/);
+  assert.match(readFileSync(f.posts, 'utf8'), /ntfy\.sh/);
+});
+
+test('a failed check does not attempt an import', () => {
+  const f = fixture({ stubExit: 2, stubJson: {} });
+  run(f.env);
+  assert.equal(existsSync(f.importArgs), false);
 });
