@@ -390,7 +390,10 @@ export async function runOnce(args, { log }) {
         collateralNote =
           ` Note: ${handBack.length} of your issue(s) (${handBack.map((e) => e.identifier).join(', ')}) ` +
           'were set to blocked by the recovery sweep misreading that pause cancellation, not by a real ' +
-          'dependency. Clear them yourself with `node scripts/clear-my-recovery-collateral.mjs --resolve`.';
+          'dependency. Clear them with `node scripts/clear-my-recovery-collateral.mjs --resolve` from a ' +
+          'TASK-BOUND heartbeat — this wake is agent-level, so that run cannot attribute the write and ' +
+          'the script will refuse with exit 3. Run it report-only here to see the list, and do not ' +
+          'release any checkout you take on them (release unassigns and orphans them to the board).';
       }
     } catch (err) {
       // Reporting is diagnostic. A failure here must not strand the resume
