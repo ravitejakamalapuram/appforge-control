@@ -36,6 +36,38 @@
  * take the company offline is a worse bug than the drift it detects. Keep the
  * only caller the sweep.
  *
+ * A DIRTY INSTALL BASELINE (APP-263)
+ *
+ * `RELEASE` records `source_tree_state` and `source_dirty_paths`, and until
+ * APP-263 this module read neither. Two things follow, and they pull in opposite
+ * directions, so both are stated:
+ *
+ * What is NOT at risk. Every versioned file is materialised by
+ * `git show <source_commit>:<path>` into a staging directory, and the manifest
+ * digest is taken from that staged file — never from the working tree
+ * (`install-runtime-launcher.sh` step 4). So the installed bytes of a versioned
+ * file come from the commit whether the tree was dirty or not, and if they ever
+ * did not, `manifest_mismatch` already catches it at `critical` on every run,
+ * for every versioned file, dirty or clean. That check needs no dirty-path
+ * gate and does not get one here: gating it on `source_dirty_paths` would be a
+ * strict weakening of a check that is currently unconditional.
+ *
+ * What IS at risk, and what this adds. A `stale` finding's severity is argued
+ * from the `source_commit..ref_tip` diff, and that argument is only sound if the
+ * deployed bytes are the ones at `source_commit`. When a path was dirty at
+ * install AND its install digest disagrees with the blob, the diff describes a
+ * transition that never happened, and the classifier must not be allowed to
+ * downgrade the finding to `low` on the strength of it. So a dirty path whose
+ * provenance fails pins `stale` at `high`. The reverse — a dirty path whose
+ * digest matches — is stated in the report and changes nothing, because nothing
+ * is wrong with it.
+ *
+ * The dirty state itself is reported in the header and the JSON, not raised as a
+ * finding. It is a fact about a past install, not a live defect: as a finding it
+ * would turn every otherwise-clean sweep on this box into a post that says the
+ * same thing forever, which is how an alarm gets ignored. The reader who needs
+ * it gets it on the provenance line of every run, clean ones included.
+ *
  * NOT A REMEDIATOR
  *
  * Same rule as the stuck-lock detector (CEO ruling on APP-91): this detects. It
@@ -142,6 +174,29 @@ export function sha256(buffer) {
 }
 
 /**
+ * `source_tree_state`, normalised. `unknown` covers two cases that must not be
+ * read as `clean`: the hand-written step-1 manifest, which predates the field,
+ * and a manifest carrying a value the installer never writes.
+ *
+ * Absence is not cleanliness. The report says `unknown` and means it.
+ */
+function parseTreeState(raw) {
+  const v = (raw ?? '').trim().toLowerCase();
+  return v === 'clean' || v === 'dirty' ? v : 'unknown';
+}
+
+/**
+ * `source_dirty_paths` as an array of repo-relative paths. The installer writes
+ * the literal `none` for a clean tree, which is zero paths, not a path named
+ * "none".
+ */
+function parseDirtyPaths(raw) {
+  const v = (raw ?? '').trim();
+  if (v === '' || v.toLowerCase() === 'none') return [];
+  return v.split(',').map((p) => p.trim()).filter((p) => p !== '');
+}
+
+/**
  * Parse `~/.appforge/RELEASE`.
  *
  * The format is a small `key: value` header followed by a `files:` block whose
@@ -199,6 +254,8 @@ export function parseReleaseManifest(text) {
     sourceRepo: header.source_repo,
     sourceRef: header.source_ref,
     sourceCommit: header.source_commit,
+    sourceTreeState: parseTreeState(header.source_tree_state),
+    sourceDirtyPaths: parseDirtyPaths(header.source_dirty_paths),
     installedAt: header.installed_at ?? null,
     installedByRun: header.installed_by_run ?? null,
     files,
@@ -224,7 +281,7 @@ function finding(kind, installPath, detail, extra = {}) {
  * always produced; classification adjusts severity and routing and can never
  * drop it (APP-261).
  */
-function staleFinding(entry, manifest, { atCommit, atTip, refTipCommit, sourceDiffs, diffLineLimit }) {
+function staleFinding(entry, manifest, { atCommit, atTip, refTipCommit, sourceDiffs, diffLineLimit, provenance }) {
   const supplied = sourceDiffs[entry.sourcePath] ?? null;
   const classification = supplied
     ? classifyStaleChange({
@@ -260,7 +317,63 @@ function staleFinding(entry, manifest, { atCommit, atTip, refTipCommit, sourceDi
     });
 
   f.severity = classification.severity;
+
+  // A dirty path whose deployed bytes are in no commit makes the diff above a
+  // description of a transition that did not happen, so it cannot be the
+  // evidence for a downgrade. Pin to the `stale` default and say why in place.
+  // Matching provenance, and a clean baseline, leave severity exactly as the
+  // classifier set it — including `low`.
+  if (provenance) {
+    f.sourceProvenance = provenance;
+    if (provenance.dirtyAtInstall && provenance.matchesInstallCommit === false) {
+      f.severity = FINDING_SEVERITY.stale;
+      f.classification = {
+        ...f.classification,
+        verdict: 'unverifiable-baseline',
+        label: 'the deployed bytes are in no commit, so the diff below is not the real delta',
+        reason: `\`${entry.sourcePath}\` was uncommitted at install time and the installed digest does not match the blob at \`${manifest.sourceCommit}\`, so \`${classification.verdict}\` was argued from the wrong baseline and cannot lower the severity`,
+        family: classification.family,
+      };
+    }
+  }
   return f;
+}
+
+/**
+ * What the manifest's own dirty record implies for one versioned file.
+ *
+ * Returns null for a file that was not dirty at install under a manifest that
+ * says so — there is nothing to qualify and nothing to print. Everything else
+ * gets a verdict the report can state, including the `unknown` tree state, where
+ * the honest answer is that the manifest does not say.
+ */
+function sourceProvenanceFor(entry, manifest, atCommit) {
+  const state = manifest.sourceTreeState ?? 'unknown';
+  const dirtyPaths = manifest.sourceDirtyPaths ?? [];
+  const dirtyAtInstall = state === 'dirty' && dirtyPaths.includes(entry.sourcePath);
+  if (!dirtyAtInstall && state !== 'unknown') return null;
+
+  const matchesInstallCommit = atCommit === null ? null : atCommit === entry.sha256;
+  return {
+    treeState: state,
+    dirtyAtInstall,
+    matchesInstallCommit,
+    installCommit: manifest.sourceCommit,
+    note: describeProvenance(state, dirtyAtInstall, matchesInstallCommit),
+  };
+}
+
+function describeProvenance(state, dirtyAtInstall, matchesInstallCommit) {
+  if (dirtyAtInstall && matchesInstallCommit === true) {
+    return 'this path was uncommitted in the source checkout at install time, but the installed digest equals the blob at the install commit, so the deployed bytes are the committed ones and the diff below is the real delta.';
+  }
+  if (dirtyAtInstall && matchesInstallCommit === false) {
+    return 'this path was uncommitted at install time AND the installed digest does not match the blob at the install commit — the deployed bytes are in no commit, so the install commit does not describe what is installed.';
+  }
+  if (dirtyAtInstall) {
+    return 'this path was uncommitted at install time and the blob at the install commit could not be read, so the deployed bytes cannot be traced to any commit.';
+  }
+  return 'the manifest does not record `source_tree_state`, so whether the source checkout was clean at install time is unknown — absence of the field is not evidence of a clean tree.';
 }
 
 /**
@@ -346,6 +459,7 @@ export function buildReport({
     } else if (atTip !== atCommit) {
       findings.push(staleFinding(entry, manifest, {
         atCommit, atTip, refTipCommit, sourceDiffs, diffLineLimit,
+        provenance: sourceProvenanceFor(entry, manifest, atCommit),
       }));
     }
   }
@@ -367,6 +481,8 @@ export function buildReport({
     sourceRepo: manifest.sourceRepo,
     sourceRef: manifest.sourceRef,
     sourceCommit: manifest.sourceCommit,
+    sourceTreeState: manifest.sourceTreeState ?? 'unknown',
+    sourceDirtyPaths: manifest.sourceDirtyPaths ?? [],
     installedAt: manifest.installedAt,
     installedByRun: manifest.installedByRun,
     refTipCommit,
@@ -393,6 +509,8 @@ export function renderProvenance(report) {
     'launcher-release:',
     `source_commit=${report.sourceCommit}`,
     `source_ref=${report.sourceRef}`,
+    `source_tree_state=${report.sourceTreeState ?? 'unknown'}`,
+    `source_dirty_paths=${(report.sourceDirtyPaths ?? []).length}`,
     `ref_tip=${report.refTipCommit ?? 'unresolved'}`,
     `deploy=${report.behind ? 'BEHIND-REF-TIP' : 'at-ref-tip'}`,
     `installed_at=${report.installedAt ?? 'unknown'}`,
@@ -404,6 +522,27 @@ export function renderProvenance(report) {
   ];
   if (report.installDir) parts.push(`install_dir=${report.installDir}`);
   return parts.join(' ');
+}
+
+/**
+ * The clause after the tree state in the report header.
+ *
+ * A dirty baseline is named with its paths because a reader judging a `stale`
+ * finding has to know whether the install commit describes what is installed —
+ * that is the whole of APP-263. A clean baseline gets nothing: the state word
+ * already said it, and padding a clean report is how the loud parts get skipped.
+ */
+function renderDirtyBaseline(report) {
+  const state = report.sourceTreeState ?? 'unknown';
+  const paths = report.sourceDirtyPaths ?? [];
+  if (state === 'clean') return ' — every versioned file traces to a commit.';
+  if (state === 'unknown') {
+    return ' — the manifest records no `source_tree_state`, so this is not a statement that the tree was clean.';
+  }
+  const listed = paths.length === 0
+    ? 'no paths were recorded'
+    : paths.map((p) => `\`${p}\``).join(', ');
+  return ` — installed under \`--allow-dirty\` with uncommitted changes to ${listed}. Versioned files are still materialised from \`${report.sourceCommit}\` by \`git show\`, and any divergence would be reported above as \`manifest_mismatch\`; the dirty record is here so a \`stale\` verdict can be read against the baseline it was argued from.`;
 }
 
 const short = (sha) => (typeof sha === 'string' && sha.length > 12 ? sha.slice(0, 12) : (sha ?? 'unknown'));
@@ -419,6 +558,7 @@ export function renderReport(report) {
     '',
     `- Live launcher was installed from \`${report.sourceCommit}\` (\`${report.sourceRef}\` in \`${report.sourceRepo}\`).`,
     `- \`${report.sourceRef}\` now points at \`${report.refTipCommit ?? 'unresolved'}\`${report.behind ? ' — **the deploy is behind the ref tip**.' : '.'}`,
+    `- Source checkout at install time: **${report.sourceTreeState ?? 'unknown'}**${renderDirtyBaseline(report)}`,
     '',
   ];
 
@@ -433,6 +573,10 @@ export function renderReport(report) {
         : '- Blast radius: sweep path — reached by the hourly sweep, not by agent launch. Still a real inert control: APP-72 was a stale sweep backstop.');
     }
     if (f.classification) lines.push(`- Change: **${f.classification.verdict}** — ${f.classification.label}. ${f.classification.reason}.`.replace(/\.\.$/, '.'));
+    if (f.sourceProvenance) {
+      const bad = f.sourceProvenance.matchesInstallCommit !== true;
+      lines.push(`- Install baseline: ${bad ? '**' : ''}${f.sourceProvenance.note}${bad ? '**' : ''}`);
+    }
     if (f.expected) lines.push(`- Expected \`${f.expected}\`, found \`${f.actual ?? 'nothing'}\`.`);
     if (f.deployedDigest) lines.push(`- Deployed blob \`${f.deployedDigest}\`, merged blob \`${f.mergedDigest}\`.`);
     if (f.manifestDigest) lines.push(`- RELEASE says \`${f.manifestDigest}\`, commit has \`${f.commitDigest}\`.`);
@@ -459,6 +603,11 @@ export function renderReport(report) {
   if (noted.length > 0) {
     lines.push('');
     lines.push(`${noted.length} finding${noted.length === 1 ? '' : 's'} carried at \`low\` because the merged delta is comments and whitespace only, proven by comparing both revisions with comments stripped. Classification adjusts severity and routing only — it never drops a finding, and \`critical\` kinds (\`tampered\`, \`missing\`, \`manifest_mismatch\`) are not classified at all, because an unexplained hand-edit to the credential-bearing launcher tree is critical for being unexplained.`);
+  }
+  const unverifiable = report.findings.filter((f) => f.sourceProvenance?.matchesInstallCommit !== true && f.sourceProvenance);
+  if (unverifiable.length > 0) {
+    lines.push('');
+    lines.push(`${unverifiable.length} finding${unverifiable.length === 1 ? '' : 's'} could not be traced to the install commit, so ${unverifiable.length === 1 ? 'its' : 'their'} merged diff is not the real delta and no comment-only downgrade was allowed to apply. Re-install from a clean checkout to make the install commit describe the install again.`);
   }
   lines.push('');
   lines.push('Detection only. Nothing was redeployed, rewritten, or reverted; remediation is a reviewed install from a named ref (APP-161), not an automatic action by this check.');

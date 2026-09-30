@@ -611,3 +611,159 @@ test('nothing agent-launch.sh invokes is left out of the launch-path table', asy
     assert.ok(LAUNCH_PATH_INSTALL_PATHS.has(installPath));
   }
 });
+
+// ---------------------------------------------------------------------------
+// APP-263 — the manifest's own `source_tree_state` / `source_dirty_paths`.
+//
+// The premise the drift check rests on is "the installed bytes came from
+// `source_commit`". These tests hold both halves of what the manifest can say
+// about that: that a dirty baseline is stated in the report, and that a dirty
+// path whose bytes are in no commit cannot be the evidence for a downgrade.
+// ---------------------------------------------------------------------------
+
+/** `staleWorld`, plus a `source_tree_state` / `source_dirty_paths` header. */
+function dirtyStaleWorld(sourcePath, before, after, { dirtyPaths = [sourcePath], treeState = 'dirty', over = {} } = {}) {
+  const text = MANIFEST_TEXT
+    .replace(`${INSTALLED}  bin/agent-launch.sh  versioned`,
+      `${INSTALLED}  bin/agent-launch.sh  versioned  ${sourcePath}`)
+    .replace(`source_commit: ${COMMIT}`,
+      `source_commit: ${COMMIT}\nsource_tree_state: ${treeState}\nsource_dirty_paths: ${dirtyPaths.length === 0 ? 'none' : dirtyPaths.join(',')}`);
+  const world = cleanWorld({ manifest: parseReleaseManifest(text), refTipCommit: TIP, ...over });
+  world.refTipDigests[sourcePath] = MERGED;
+  world.sourceDiffs = {
+    [sourcePath]: {
+      diffText: unifiedDiff(sourcePath, before, after),
+      beforeText: before,
+      afterText: after,
+    },
+  };
+  return world;
+}
+
+const COMMENT_BEFORE = '// old note\nrun();\n';
+const COMMENT_AFTER = '// new note\nrun();\n';
+
+test('the dirty baseline is parsed off the manifest rather than assumed clean', () => {
+  const m = dirtyStaleWorld('scripts/x.mjs', COMMENT_BEFORE, COMMENT_AFTER).manifest;
+  assert.equal(m.sourceTreeState, 'dirty');
+  assert.deepEqual(m.sourceDirtyPaths, ['scripts/x.mjs']);
+  // `none` is zero paths, not a path called "none".
+  assert.deepEqual(
+    dirtyStaleWorld('scripts/x.mjs', COMMENT_BEFORE, COMMENT_AFTER, { treeState: 'clean', dirtyPaths: [] }).manifest.sourceDirtyPaths,
+    []);
+  // A real multi-path header, as the installer writes it.
+  const multi = parseReleaseManifest(MANIFEST_TEXT.replace(`source_commit: ${COMMIT}`,
+    `source_commit: ${COMMIT}\nsource_tree_state: dirty\nsource_dirty_paths: scripts/a.sh,scripts/b.mjs, scripts/c.mjs`));
+  assert.deepEqual(multi.sourceDirtyPaths, ['scripts/a.sh', 'scripts/b.mjs', 'scripts/c.mjs']);
+});
+
+test('a manifest with no tree-state field reads as unknown, never as clean', () => {
+  // The hand-written step-1 manifest predates both fields. Absence of evidence
+  // that the tree was dirty is not evidence that it was clean.
+  assert.equal(manifest().sourceTreeState, 'unknown');
+  assert.deepEqual(manifest().sourceDirtyPaths, []);
+  const report = buildReport(cleanWorld());
+  assert.equal(report.sourceTreeState, 'unknown');
+  assert.match(renderProvenance(report), /source_tree_state=unknown/);
+});
+
+// Acceptance criterion 1.
+test('the report header and JSON carry the dirty baseline and its paths', () => {
+  const world = dirtyStaleWorld('scripts/x.mjs', COMMENT_BEFORE, COMMENT_AFTER);
+  const report = buildReport(world);
+  assert.equal(report.sourceTreeState, 'dirty');
+  assert.deepEqual(report.sourceDirtyPaths, ['scripts/x.mjs']);
+  // The provenance line is printed on every run, clean ones included, so the
+  // baseline is answerable after the fact without anyone having noticed.
+  assert.match(renderProvenance(report), /source_tree_state=dirty source_dirty_paths=1/);
+  const text = renderReport(report);
+  assert.match(text, /Source checkout at install time: \*\*dirty\*\*/);
+  assert.match(text, /--allow-dirty/);
+  assert.match(text, /`scripts\/x\.mjs`/);
+});
+
+test('a clean baseline says so once and does not pad the report', () => {
+  const report = buildReport(dirtyStaleWorld('scripts/x.mjs', COMMENT_BEFORE, COMMENT_AFTER,
+    { treeState: 'clean', dirtyPaths: [] }));
+  const text = renderReport(report);
+  assert.match(text, /Source checkout at install time: \*\*clean\*\*/);
+  assert.doesNotMatch(text, /--allow-dirty/);
+  assert.doesNotMatch(text, /Install baseline:/);
+  assert.match(renderProvenance(report), /source_tree_state=clean source_dirty_paths=0/);
+});
+
+// Acceptance criterion 2, the matching half: this is the live case today.
+test('a dirty path whose install digest matches the commit is stated and keeps its severity', () => {
+  // cleanWorld sets commitDigests[sourcePath] = the manifest digest, so the
+  // deployed bytes ARE the committed ones — exactly the measured live state.
+  const { f } = onlyFinding(dirtyStaleWorld('scripts/x.mjs', COMMENT_BEFORE, COMMENT_AFTER));
+  assert.equal(f.kind, 'stale');
+  assert.equal(f.sourceProvenance.dirtyAtInstall, true);
+  assert.equal(f.sourceProvenance.matchesInstallCommit, true);
+  // The classifier's verdict stands untouched: nothing is wrong with this file.
+  assert.equal(f.classification.verdict, 'comment_only');
+  assert.equal(f.severity, 'low');
+  const text = renderReport(buildReport(dirtyStaleWorld('scripts/x.mjs', COMMENT_BEFORE, COMMENT_AFTER)));
+  assert.match(text, /Install baseline: this path was uncommitted in the source checkout at install time, but the installed digest equals the blob/);
+  assert.doesNotMatch(text, /could not be traced to the install commit/);
+});
+
+// Acceptance criterion 2, the mismatching half.
+test('a dirty path whose install digest is in no commit cannot be downgraded', () => {
+  // A comment-only merged delta would normally land `low`. It must not here:
+  // the diff is `source_commit..tip`, and the deployed bytes are neither end.
+  const world = dirtyStaleWorld('scripts/x.mjs', COMMENT_BEFORE, COMMENT_AFTER);
+  world.commitDigests['scripts/x.mjs'] = EDITED; // blob at the commit != manifest digest
+  const report = buildReport(world);
+
+  const stale = report.findings.find((f) => f.kind === 'stale');
+  assert.ok(stale, 'the stale finding is still produced; classification never drops a finding');
+  assert.equal(stale.severity, 'high', 'a comment-only downgrade argued from the wrong baseline must not apply');
+  assert.equal(stale.classification.verdict, 'unverifiable-baseline');
+  assert.equal(stale.sourceProvenance.matchesInstallCommit, false);
+  assert.ok(report.shouldEscalate, 'an install the commit does not describe escalates');
+
+  // And the pre-existing unconditional check fires too: this is `critical`
+  // already, without any dirty-path gate. APP-263 does not weaken that.
+  assert.ok(kinds(report).includes('manifest_mismatch'));
+  assert.equal(report.worstSeverity, 'critical');
+
+  const text = renderReport(report);
+  assert.match(text, /\*\*this path was uncommitted at install time AND the installed digest does not match/);
+  assert.match(text, /could not be traced to the install commit/);
+  assert.match(text, /no comment-only downgrade was allowed to apply/);
+});
+
+test('a dirty path not among the dirty paths is unqualified, so a clean manifest is a true regression test', () => {
+  // The tree was dirty, but this file was not one of the dirty paths, so its
+  // bytes trace to the commit the same as under a clean install.
+  const { f } = onlyFinding(dirtyStaleWorld('scripts/x.mjs', COMMENT_BEFORE, COMMENT_AFTER,
+    { dirtyPaths: ['scripts/unrelated.mjs'] }));
+  assert.equal(f.severity, 'low');
+  assert.equal(f.sourceProvenance, undefined, 'nothing to qualify, so nothing is printed');
+});
+
+test('a mismatched digest on a CLEAN baseline is still critical and still not downgraded past high', () => {
+  // The regression guard: the dirty-path logic must not be the only thing
+  // catching a manifest that disagrees with its own commit.
+  const world = dirtyStaleWorld('scripts/x.mjs', COMMENT_BEFORE, COMMENT_AFTER,
+    { treeState: 'clean', dirtyPaths: [] });
+  world.commitDigests['scripts/x.mjs'] = EDITED;
+  const report = buildReport(world);
+  assert.ok(kinds(report).includes('manifest_mismatch'));
+  assert.equal(report.worstSeverity, 'critical');
+  assert.ok(report.shouldEscalate);
+});
+
+// APP-263 item 3 asked whether to add a `--allow-dirty` opt-in to the installer.
+// It is already there and already covered end-to-end, by tests that run the real
+// installer against a fixture rather than grepping its source:
+//
+//   scripts/tests/install-runtime-launcher.test.mjs
+//     'refuses a dirty source tree unless --allow-dirty, which is then recorded'
+//     'a clean tree is recorded as clean'
+//     'versioned files come from the commit, never from the working tree'
+//
+// That last one is the reason a dirty install cannot contaminate a versioned
+// file's bytes, and so the reason this module's job is to report the baseline
+// rather than to re-derive it. Nothing is duplicated here.
