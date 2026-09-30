@@ -20,10 +20,11 @@
  * case where the script *is* running but has lost track of a pause.
  *
  * DEGRADE-SILENT CONTRACT: every function here is a no-op when its env var
- * is absent, and none of them ever throw or reject. The plist carries the
- * secret values inline (launchd does not source `.envrc`), so injecting
- * them is a founder/operator step -- until that happens the watchdog must
- * keep doing its real job without crashing and without noise. A monitoring
+ * is absent, and none of them ever throw or reject. The values reach the
+ * process through the plist, a template that install-plists.sh fills from
+ * `.envrc` at install time (never committed); until a value is provisioned
+ * the watchdog must keep doing its real job without crashing and without
+ * noise. A monitoring
  * failure must never become an availability failure for the thing being
  * monitored.
  *

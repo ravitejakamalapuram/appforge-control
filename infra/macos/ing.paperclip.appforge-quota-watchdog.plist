@@ -42,38 +42,20 @@
 <plist version="1.0">
 <dict>
 	<!--
-	  LIVENESS SIGNALLING (APP-103 / DEBT-0003) IS NOT PROVISIONED HERE.
+	  LIVENESS SIGNALLING (APP-103 / DEBT-0003).
 
-	  The script pings healthchecks.io on a healthy pass and pushes an ntfy
-	  alert on a failed one, but ONLY when these two variables are present.
-	  With them absent it degrades to a silent no-op — it still does its real
-	  job (pausing quota-failed agents and resuming them at the reset), it
-	  simply reports nothing. That is deliberate: a monitoring gap must never
-	  become an availability failure for the thing being monitored.
+	  This is a TEMPLATE (PR #43): install-plists.sh fills each double-underscore
+	  placeholder from the environment or ~/git-personal/.envrc at install time.
+	  No secret value is ever committed here.
 
-	  Injecting them is a founder/operator step, not a commit, because
-	  launchd does not source `.envrc` and the values would therefore have to
-	  be inlined here in git. To provision:
+	  NTFY_TOPIC below is filled the same way as for the sibling jobs, so the
+	  watchdog pushes a (throttled) alert on a failed pass once reinstalled.
 
-	    1. Create a new healthchecks.io check for this job — its OWN check,
-	       not a reuse of the sync or backup one, or this job's silence gets
-	       masked by another job's pings. Period 90s (matching StartInterval
-	       below), grace 10 minutes (~6 passes: loose enough to survive one
-	       slow pass or a brief sleep, tight enough that a dead LaunchAgent
-	       is noticed the same hour).
-	    2. Add both keys inside <EnvironmentVariables> below:
-	         <key>HEALTHCHECKS_PING_URL_WATCHDOG</key>
-	         <string>https://hc-ping.com/YOUR-CHECK-UUID</string>
-	         <key>NTFY_TOPIC</key>
-	         <string>the same topic the sync and backup plists already use</string>
-	    3. plutil -lint on this file, then reload the LaunchAgent:
-	         launchctl bootout gui/$(id -u)/ing.paperclip.appforge-quota-watchdog
-	         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ing.paperclip.appforge-quota-watchdog.plist
-	    4. Confirm `logs/quota-retry-watchdog.log` now says `liveness=on` on
-	       the next pass, and that the healthchecks.io check goes green.
-
-	  Do NOT add these keys with placeholder values — a placeholder makes the
-	  script believe it is provisioned and ping a dead URL every 90 seconds.
+	  HEALTHCHECKS_PING_URL_WATCHDOG is deliberately NOT a placeholder yet:
+	  install-plists.sh refuses to install with an unfilled placeholder, so
+	  adding it before the healthchecks.io check exists would block
+	  reinstalling the watchdog at all. The script skips the ping when it is
+	  absent. Provisioning steps: infra/macos/README.md, quota watchdog section.
 	-->
 	<key>EnvironmentVariables</key>
 	<dict>
@@ -83,6 +65,8 @@
 		<string>/Users/rkamalapuram</string>
 		<key>CLAUDE_CONFIG_DIR</key>
 		<string>/Users/rkamalapuram/git-personal/appforge-control/.claude-appforge</string>
+		<key>NTFY_TOPIC</key>
+		<string>__NTFY_TOPIC__</string>
 	</dict>
 	<key>WorkingDirectory</key>
 	<string>/Users/rkamalapuram/git-personal/appforge-control</string>

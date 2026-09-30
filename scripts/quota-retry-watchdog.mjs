@@ -718,9 +718,9 @@ async function main() {
 
   // APP-103 / DEBT-0003: liveness signalling, same pattern backup.sh and
   // sync.sh already use. Degrades to a silent no-op when the env vars are
-  // absent (they live in the plist's EnvironmentVariables, which is a
-  // founder/operator step because launchd does not source `.envrc`), so an
-  // un-provisioned watchdog still does its real job without crashing.
+  // absent (they reach the process through the plist template, filled from
+  // `.envrc` by install-plists.sh at install time -- see infra/macos/README.md),
+  // so an un-provisioned watchdog still does its real job without crashing.
   const notifier = notifierConfigFromEnv(process.env);
   const alertStateFile = alertStateFileFor(args.stateFile);
   const errors = [];
