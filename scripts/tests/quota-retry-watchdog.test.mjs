@@ -16,6 +16,7 @@ import {
   duePendingActions,
   RETRYABLE_TRANSIENT_ERROR_CODES,
   QUOTA_ERROR_CODE,
+  readRunIssueId,
 } from '../lib/quota-retry-watchdog.mjs';
 
 // Real error text observed on APP-45's investigation:
@@ -261,4 +262,58 @@ test('pending actions: a new pending action for an agent overwrites a stale one'
   const due = duePendingActions(state, 2000);
   assert.equal(due.length, 1);
   assert.equal(due[0][1].runId, 'run-2');
+});
+
+// ---------------------------------------------------------------------------
+// APP-181: readRunIssueId -- the issue binding a resumed wake has to carry.
+//
+// The shapes below are the two real runs from the APP-181 report, read back
+// from GET /api/companies/{id}/heartbeat-runs:
+//   c6e25521 -- the watchdog-resumed run, whose snapshot has no issue at all;
+//               its PATCH and comment calls were refused 403.
+//   8fbd89d9 -- an ordinary issue_assigned run; the identical PATCH passed.
+// ---------------------------------------------------------------------------
+
+test('readRunIssueId: reads contextSnapshot.issueId from a normally-bound run', () => {
+  const run = {
+    id: '8fbd89d9-3fc2-4b75-acbf-10e82479fbc9',
+    contextSnapshot: {
+      issueId: '9e10eb61-125a-4ad1-aa67-073b64b7acc9',
+      taskId: '9e10eb61-125a-4ad1-aa67-073b64b7acc9',
+      taskKey: '9e10eb61-125a-4ad1-aa67-073b64b7acc9',
+      wakeReason: 'issue_assigned',
+    },
+  };
+  assert.equal(readRunIssueId(run), '9e10eb61-125a-4ad1-aa67-073b64b7acc9');
+});
+
+test('readRunIssueId: returns null for the unbound watchdog-resumed run shape that caused APP-181', () => {
+  const run = {
+    id: 'c6e25521-03a4-4473-aa3f-57a5ff569d4d',
+    contextSnapshot: {
+      wakeReason: 'resuming after provider_quota reset (watchdog)',
+      wakeSource: 'automation',
+      wakeTriggerDetail: 'system',
+    },
+  };
+  assert.equal(readRunIssueId(run), null);
+});
+
+test('readRunIssueId: falls back through taskId and nativeIssueId, in the server\'s own order', () => {
+  assert.equal(readRunIssueId({ contextSnapshot: { taskId: 'issue-t' } }), 'issue-t');
+  assert.equal(readRunIssueId({ contextSnapshot: {}, nativeIssueId: 'issue-n' }), 'issue-n');
+  // issueId wins over taskId, and both win over nativeIssueId.
+  assert.equal(
+    readRunIssueId({ contextSnapshot: { issueId: 'issue-i', taskId: 'issue-t' }, nativeIssueId: 'issue-n' }),
+    'issue-i',
+  );
+});
+
+test('readRunIssueId: tolerates the snapshot shapes that are not objects, and blank strings', () => {
+  assert.equal(readRunIssueId({}), null);
+  assert.equal(readRunIssueId({ contextSnapshot: null }), null);
+  assert.equal(readRunIssueId({ contextSnapshot: ['issue-x'] }), null, 'an array snapshot is not a binding');
+  assert.equal(readRunIssueId({ contextSnapshot: { issueId: '   ' } }), null, 'whitespace is not an issue id');
+  assert.equal(readRunIssueId({ contextSnapshot: { issueId: ' issue-i ' } }), 'issue-i', 'ids are trimmed');
+  assert.equal(readRunIssueId(null), null);
 });

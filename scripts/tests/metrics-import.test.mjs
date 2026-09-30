@@ -69,10 +69,98 @@ test('verbatim headers reach the manifest, so the question is answerable later',
 test('an unimplemented source fails loudly rather than writing a half entry', () => {
   const { dir, file } = stage();
   assert.throws(
-    () => runImport({ source: 'play', item: 'invtrack', file, data_root: dir }),
-    /Play read-only service account is not provisioned/
+    () => runImport({ source: 'gumroad', item: 'echokit', file, data_root: dir }),
+    /has no importer yet/
   );
   assert.equal(readManifest(dir).length, 0);
+});
+
+// -------------------------------------------------------------------------
+// Google Play (APP-210). The importer consumes a FILE the ingest job
+// downloaded from the reports bucket; no credential reaches this process.
+// These tests use the SYNTHETIC fixture, so they prove the CODE path only —
+// the header mappings stay `confirmed: false` until real bytes land.
+// -------------------------------------------------------------------------
+
+const PLAY_FIXTURE = fileURLToPath(new URL('./fixtures/play-installs-SYNTHETIC.csv', import.meta.url));
+
+test('a Play import lands a manifest entry with a DERIVED lag', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'metrics-import-play-'));
+  const { entry } = runImport({
+    source: 'play', item: 'invtrack', file: PLAY_FIXTURE,
+    data_root: dir, exported_at: '2026-09-28T00:05:00Z',
+    // A supplied lag must be ignored in favour of the derived one, exactly as
+    // for CWS. Calendar days: data through the 27th pulled at 00:05 on the
+    // 28th is ONE day, not zero.
+    lag_days: 99,
+  });
+
+  assert.equal(entry.source, 'play_reports_bucket');
+  assert.equal(entry.item_id, 'invtrack');
+  assert.equal(entry.as_of, '2026-09-27');
+  assert.equal(entry.lag_days, 1, 'derived from as_of and exported_at, not supplied');
+  assert.equal(entry.metrics.play_installs, 3);
+  assert.equal(entry.metrics.play_uninstalls, 2);
+  assert.equal(entry.metrics.play_active_devices_30d, 26);
+  assert.equal(entry.checksum.length, 64);
+  assert.equal(readManifest(dir).length, 1);
+});
+
+test('the Play manifest entry states that nothing was synthesized', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'metrics-import-play-'));
+  const { entry, provenance } = runImport({
+    source: 'play', item: 'invtrack', file: PLAY_FIXTURE,
+    data_root: dir, exported_at: '2026-09-28T00:05:00Z',
+  });
+
+  // The written record, not just the in-memory object: a later reader asking
+  // "was any of this computed?" must be able to answer from the manifest.
+  const [written] = readManifest(dir);
+  assert.deepEqual(written.notes.synthesized_metrics, []);
+  assert.equal(written.notes.aggregation, 'none — single row, as_of');
+  assert.equal(written.notes.weekly_distinct.available, false);
+  assert.equal(written.notes.weekly_distinct.reason_code, 'play_wau_unavailable');
+  assert.ok(written.notes.headers_verbatim.includes('Active Device Installs'));
+  assert.equal(written.notes.encoding_detected, 'utf-8 (no BOM)');
+  assert.ok(provenance.unconfirmed_mappings.includes('play_active_devices_30d'));
+  assert.equal(entry.notes.family_choice, 'device');
+});
+
+test('no Play metric may stand in for a weekly-distinct quantity', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'metrics-import-play-'));
+  const { entry } = runImport({
+    source: 'play', item: 'invtrack', file: PLAY_FIXTURE,
+    data_root: dir, exported_at: '2026-09-28T00:05:00Z',
+  });
+  const contract = loadContract(PORTFOLIO);
+
+  // Belt and braces: the parser cannot emit a weekly name, and the contract
+  // refuses the substitution even if something downstream tried it by hand.
+  for (const name of Object.keys(entry.metrics)) {
+    assert.ok(!/weekly|wau/i.test(name));
+  }
+  assert.throws(
+    () => assertNotAliased(contract, 'play_active_devices_30d', 'true_wau'),
+    /forbidden alias/
+  );
+  assert.throws(
+    () => assertNotAliased(contract, 'play_active_devices_30d', 'cws_weekly_users'),
+    /forbidden alias/
+  );
+});
+
+test('the raw Play report is kept, byte-identical, next to the manifest', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'metrics-import-play-'));
+  const { entry } = runImport({
+    source: 'play', item: 'invtrack', file: PLAY_FIXTURE,
+    data_root: dir, exported_at: '2026-09-28T00:05:00Z',
+  });
+  assert.ok(existsSync(entry.raw_path));
+  assert.equal(
+    readFileSync(entry.raw_path).toString('base64'),
+    readFileSync(PLAY_FIXTURE).toString('base64'),
+    'the artefact behind the numbers must survive unaltered'
+  );
 });
 
 test('required arguments are enforced', () => {

@@ -17,6 +17,9 @@
 //   node scripts/metrics-import.mjs --source ga4 --item json-workbench \
 //        --file <runReport-response.json> [--property <numeric property id>]
 //
+//   node scripts/metrics-import.mjs --source play --item invtrack \
+//        --file <installs_overview.csv> [--package com.example.invtrack]
+//
 // `cws` is the founder-session dashboard CSV (five fields). `cws_listing` is
 // the PUBLIC listing page (the two rating fields) — anonymous HTTPS, no
 // credential, no founder session, so it needs nothing provisioned.
@@ -29,6 +32,11 @@
 // prints the exact `runReport` call to make (no credential involved, so it is
 // deterministic and testable here), and the import consumes the response
 // FILE the ingest job got back. This script never holds the OAuth token.
+//
+// `play` is a Google Play statistics report, as downloaded from the
+// `pubsite_prod_rev_<developer_id>` bucket by the ingest job. APP-210. It
+// consumes a FILE: the read-only service-account key is bound to the ingest
+// job and is never seen here.
 //
 // `--exported-at` defaults to now, which is correct for a live pull. It is
 // settable so a manually dropped file (the cycle-one fallback) can record
@@ -43,6 +51,7 @@ import { join, basename } from 'node:path';
 import { parseCwsExport, headerProvenance } from './lib/cws-export.mjs';
 import { parseCwsListing, parseAttestedListing, listingProvenance } from './lib/cws-listing.mjs';
 import { parseGa4Report, ga4Provenance, buildRunReportRequest } from './lib/ga4-report.mjs';
+import { parsePlayReport, playProvenance } from './lib/play-report.mjs';
 import { createManifestEntry, appendManifest, sha256 } from './lib/metrics-manifest.mjs';
 
 function parseArgs(argv) {
@@ -68,36 +77,41 @@ export function runImport(args) {
   if (!itemId) throw new Error('--item is required (the store item id)');
   if (!file) throw new Error('--file is required');
 
-  const raw = readFileSync(file, 'utf8');
+  // Read BYTES. The existing sources are utf8 text, but Play reports carry a
+  // byte-order mark that decides their encoding, and reading them as utf8 up
+  // front would destroy the evidence the parser needs.
+  const rawBytes = readFileSync(file);
 
   const LISTING_SOURCES = new Set(['cws_listing', 'cws_listing_attested']);
-  const IMPLEMENTED = new Set(['cws', 'ga4', ...LISTING_SOURCES]);
+  const IMPLEMENTED = new Set(['cws', 'play', 'ga4', ...LISTING_SOURCES]);
   if (!IMPLEMENTED.has(source)) {
-    // Play lands through the service-account bucket reader, which is not yet
-    // provisioned — see docs/metrics-ingest.md §Google Play. Failing loudly
-    // beats writing a half-formed manifest entry.
     throw new Error(
       `source "${source}" has no importer yet. Implemented: ` +
-        `${[...IMPLEMENTED].join(', ')}; the Play read-only service account is ` +
-        'not provisioned (docs/metrics-ingest.md).'
+        `${[...IMPLEMENTED].join(', ')} (docs/metrics-ingest.md).`
     );
   }
 
   let parsed;
   if (source === 'ga4') {
-    parsed = parseGa4Report(raw, {
+    parsed = parseGa4Report(rawBytes.toString('utf8'), {
       item_id: itemId,
       exported_at: exportedAt,
       property_id: args.property ?? null,
     });
+  } else if (source === 'play') {
+    parsed = parsePlayReport(rawBytes, {
+      item_id: itemId,
+      exported_at: exportedAt,
+      package: args.package ?? null,
+    });
   } else if (source === 'cws_listing_attested') {
     // `exported_at` comes from the attestation, not from the clock or a flag:
     // the reading is as of when it was CAPTURED, not when it was loaded here.
-    parsed = parseAttestedListing(JSON.parse(raw), { item_id: itemId });
+    parsed = parseAttestedListing(JSON.parse(rawBytes.toString('utf8')), { item_id: itemId });
   } else if (source === 'cws_listing') {
-    parsed = parseCwsListing(raw, { item_id: itemId, fetched_at: exportedAt, scope: args.scope ?? null });
+    parsed = parseCwsListing(rawBytes.toString('utf8'), { item_id: itemId, fetched_at: exportedAt, scope: args.scope ?? null });
   } else {
-    parsed = parseCwsExport(raw, { item_id: itemId, exported_at: exportedAt });
+    parsed = parseCwsExport(rawBytes.toString('utf8'), { item_id: itemId, exported_at: exportedAt });
   }
 
   // Keep the raw export next to the manifest, checksummed, so any later
@@ -144,6 +158,23 @@ export function runImport(args) {
             backfillable: parsed.backfillable,
             property_quota: parsed.property_quota,
           }
+        : source === 'play'
+        ? {
+            headers_verbatim: parsed.headers_verbatim,
+            unmapped_headers: parsed.unmapped_headers,
+            row_count: parsed.row_count,
+            // The three fields that keep a later reader from having to trust
+            // this run: what was read rather than computed, which family of
+            // Play's duplicated columns was taken, and why there is no weekly
+            // figure here.
+            aggregation: parsed.aggregation,
+            synthesized_metrics: parsed.synthesized_metrics,
+            weekly_distinct: parsed.weekly_distinct,
+            semantic_caveats: parsed.semantic_caveats,
+            family_choice: parsed.family_choice,
+            package_names_verbatim: parsed.package_names_verbatim,
+            encoding_detected: parsed.encoding_detected,
+          }
         : LISTING_SOURCES.has(source)
         ? {
             // A structural zero, not a measured one — the listing carries no
@@ -171,6 +202,8 @@ export function runImport(args) {
     provenance:
       source === 'ga4'
         ? ga4Provenance(parsed)
+        : source === 'play'
+        ? playProvenance(parsed)
         : LISTING_SOURCES.has(source)
           ? listingProvenance(parsed)
           : headerProvenance(parsed),
@@ -269,6 +302,21 @@ function main() {
       }
       console.log(`    why: ${provenance.withheld_rule.reason}`);
     }
+    return;
+  }
+  if (args.source === 'play') {
+    console.log('Play report provenance (APP-210) — no credential read by this script:');
+    console.log(`  verbatim headers : ${JSON.stringify(provenance.observed_headers)}`);
+    console.log(`  encoding         : ${provenance.encoding_detected}  <- detected from the BOM, not assumed`);
+    if (provenance.unmapped_headers.length) {
+      console.log(`  UNMAPPED         : ${JSON.stringify(provenance.unmapped_headers)}`);
+      console.log(`    family taken   : ${provenance.family_choice.chosen} — ${provenance.family_choice.why}`);
+    }
+    console.log(`  package name(s)  : ${JSON.stringify(provenance.package_names_verbatim)}`);
+    console.log(`  still unconfirmed: ${provenance.unconfirmed_mappings.join(', ')}  <- second-hand until real bytes land`);
+    console.log(`  aggregation      : ${entry.notes.aggregation}`);
+    console.log(`  synthesized      : ${JSON.stringify(provenance.synthesized_metrics)}  <- nothing computed; every value read from one row`);
+    console.log(`  weekly distinct  : unavailable — ${provenance.weekly_distinct.reason_code} (${provenance.weekly_distinct.ruling})`);
     for (const [metric, caveat] of Object.entries(provenance.semantic_caveats)) {
       console.log(`  CAVEAT ${metric}:`);
       console.log(`    ${caveat}`);

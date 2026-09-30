@@ -73,6 +73,7 @@ import {
   setPendingAction,
   clearPendingAction,
   duePendingActions,
+  readRunIssueId,
 } from './lib/quota-retry-watchdog.mjs';
 import {
   partitionRecoveryCollateral,
@@ -264,11 +265,22 @@ function pauseAgent(agentId, ctx) {
 function resumeAgent(agentId, ctx) {
   return paperclipCli(['agent', 'resume', agentId], { ...ctx, describe: `resume ${agentId}` });
 }
-function wakeAgent(agentId, reason, ctx) {
-  return paperclipCli(
-    ['agent', 'wake', agentId, '--source', 'automation', '--trigger', 'system', '--reason', reason],
-    { ...ctx, describe: `wake ${agentId}` },
-  );
+// A wake with no `issueId` in its payload produces a run the server does not
+// consider task-bound: `contextSnapshot` carries only the wake reason/source,
+// so `readRunSourceIssueId` returns null and every `PATCH /api/issues/:id`
+// and `POST /api/issues/:id/comments` from that run is refused with
+// `403 cross_issue_influence_run_context_required` -- even on the issue the
+// run itself checked out, because the limiter's same-issue exemption needs a
+// source issue to compare against (APP-181). Forwarding the interrupted run's
+// own issue restores the binding the interruption lost.
+//
+// This is not a widening of what the agent may do: the issue is the one that
+// agent was already working, the wake route's own execution-blocker check
+// still applies, and an agent with no recorded issue is still woken unbound.
+function wakeAgent(agentId, reason, ctx, { issueId = null } = {}) {
+  const args = ['agent', 'wake', agentId, '--source', 'automation', '--trigger', 'system', '--reason', reason];
+  if (issueId) args.push('--payload', JSON.stringify({ issueId }));
+  return paperclipCli(args, { ...ctx, describe: `wake ${agentId}` });
 }
 
 // -- main pass --------------------------------------------------------------
@@ -331,6 +343,7 @@ export async function runOnce(args, { log }) {
       setPendingAction(state, run.agentId, {
         kind: 'quota',
         runId: run.id,
+        issueId: readRunIssueId(run),
         scheduledAtMs,
         reason: 'resuming after provider_quota reset (watchdog)',
       });
@@ -358,6 +371,7 @@ export async function runOnce(args, { log }) {
       setPendingAction(state, run.agentId, {
         kind: 'backoff',
         runId: run.id,
+        issueId: readRunIssueId(run),
         scheduledAtMs,
         reason: `resuming after ${run.errorCode} backoff attempt ${attempt} (watchdog)`,
       });
@@ -372,6 +386,12 @@ export async function runOnce(args, { log }) {
     const name = agentName(agentId);
     await resumeAgent(agentId, cliCtx);
     log(`RESUME agent=${name} (was pending ${action.kind} for run=${action.runId})`);
+    // `action.issueId` is absent for pending actions written by a watchdog
+    // build older than APP-181, and null for an interrupted run the runtime
+    // never bound. Both still get woken -- unbound, as before -- but the log
+    // says so, because that run will hit the 403 this binding exists to
+    // prevent and the operator should not have to infer it.
+    const issueId = action.issueId || null;
 
     // The pause we just lifted cancelled this agent's in-flight runs with
     // `errorCode: agent_paused`, which Paperclip's recovery sweep cannot
@@ -387,10 +407,21 @@ export async function runOnce(args, { log }) {
       for (const line of formatCollateralReport(handBack, { agentName: name })) log(line);
       for (const line of formatBoardOnlyReport(boardOnly, { agentName: name })) log(line);
       if (handBack.length) {
+        // `--resolve` needs a TASK-BOUND run (it exits 3 otherwise). Whether
+        // this wake produces one is exactly what `issueId` decides, so the
+        // advice differs: a bound wake can drain the collateral in place, an
+        // unbound one cannot and must not be told to try.
         collateralNote =
           ` Note: ${handBack.length} of your issue(s) (${handBack.map((e) => e.identifier).join(', ')}) ` +
           'were set to blocked by the recovery sweep misreading that pause cancellation, not by a real ' +
-          'dependency. Clear them yourself with `node scripts/clear-my-recovery-collateral.mjs --resolve`.';
+          'dependency. ' +
+          (issueId
+            ? 'This wake is task-bound, so you can clear them here: run `node ' +
+              'scripts/clear-my-recovery-collateral.mjs --resolve`.'
+            : 'This wake is agent-level and UNBOUND, so `node scripts/clear-my-recovery-collateral.mjs ' +
+              '--resolve` will refuse with exit 3 — it cannot attribute the write. Run it report-only ' +
+              'here to see the list, and leave the clearing to a task-bound heartbeat.') +
+          ' Do not release any checkout you take on them (release unassigns and orphans them to the board).';
       }
     } catch (err) {
       // Reporting is diagnostic. A failure here must not strand the resume
@@ -398,8 +429,13 @@ export async function runOnce(args, { log }) {
       log(`COLLATERAL lookup failed agent=${name}: ${err.message}`);
     }
 
-    await wakeAgent(agentId, `${action.reason}${collateralNote}`, cliCtx);
-    log(`WAKE agent=${name} reason="${action.reason}"${collateralNote ? ' (+collateral note)' : ''}`);
+    await wakeAgent(agentId, `${action.reason}${collateralNote}`, cliCtx, { issueId });
+    log(
+      `WAKE agent=${name} reason="${action.reason}"${collateralNote ? ' (+collateral note)' : ''} ` +
+        (issueId
+          ? `issue=${issueId} (task-bound: the resumed run can PATCH and comment)`
+          : 'issue=none (UNBOUND: the resumed run will be refused issue PATCH/comment -- APP-181)'),
+    );
 
     clearPendingAction(state, agentId);
   }

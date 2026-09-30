@@ -51,6 +51,60 @@
 // The `board_only` orphans are printed and left alone. No prior run outcome is
 // ever asserted.
 //
+// IT NEEDS A TASK-BOUND RUN, NOT MERELY A LIVE ONE (APP-217 heartbeat)
+//
+// The header above says the woken agent's run-scoped credential satisfies the
+// owner gate. That is half true, and the missing half made this script
+// unreachable from the one wake that advertises it.
+//
+// `POST /api/issues/:id/recovery-actions/resolve` is a CROSS-ISSUE write, so it
+// is gated by `cross_issue_influence_run_context_required`. That gate wants the
+// run to be TASK-BOUND (`PAPERCLIP_TASK_ID` set), not just alive. A wake that
+// does not bind one produces a run where EVERY resolve 403s, and so does every
+// `PATCH /api/issues/:id`.
+//
+// Verified on run a520f601: sending `X-Paperclip-Run-Id` does not help (the
+// 403's own `sanctionedPath` tells you to send the header you already sent),
+// and neither does checking the issue out first. Checkout returns 200 and takes
+// the lock, but it does NOT bind write attribution.
+//
+// CORRECTION (APP-181): an agent-level wake CAN be bound
+//
+// This header used to claim `POST /api/agents/:id/wakeup` "has no issue/task
+// field at all (checked against the served OpenAPI), so the run it starts is
+// always task-unbound". The OpenAPI reading was right and the conclusion was
+// wrong. The route's body is `wakeAgentSchema`, whose `payload` is a free-form
+// `z.record` — so no `issueId` key is *documented*, but the server reads one:
+//
+//   route (`routes/agents.js`)  wakePayload = req.body.payload -> heartbeat.wakeup
+//   `enqueueWakeup`             -> enrichWakeContextSnapshot({ payload })
+//   `enrichWakeContextSnapshot` payload.issueId ?? payload.taskId
+//                               -> contextSnapshot.issueId AND .taskId
+//   adapter `execute.js`        contextSnapshot.taskId ?? .issueId
+//                               -> env.PAPERCLIP_TASK_ID
+//
+// (traced through `@paperclipai/server` + `@paperclipai/adapter-claude-local`
+// 2026.916.1, the installed dist). So `paperclipai agent wake <agentId>
+// --payload '{"issueId":"<uuid>"}'` yields a task-bound run, and the watchdog
+// now sends exactly that (APP-181). `--resolve` is reachable from a watchdog
+// resume whenever the interrupted run had a recorded issue.
+//
+// It still refuses up front on a task-unbound run rather than emitting one
+// confusing 403 per issue, because two unbound wakes remain: a pending action
+// written by a pre-APP-181 watchdog build, and an interrupted run the runtime
+// never bound in the first place. The residual deadlock for those is tracked on
+// APP-164:
+//   pause cancellation -> sweep blocks the issues -> a blocked issue is never
+//   picked for a task-bound heartbeat -> the collateral can never be cleared.
+//
+// NEVER `release` A COLLATERAL ISSUE TO "CLEAN UP" A CHECKOUT
+//
+// Also verified on that run: `POST /api/issues/:id/release` sets the issue back
+// to `todo` AND clears `assigneeAgentId`. An unassigned issue with an active
+// action is exactly the `board_only` shape this script refuses to touch, so
+// releasing one converts a self-clearable item into one that needs the founder.
+// If you checked one out, leave it checked out.
+//
 // Usage (inside a heartbeat, where PAPERCLIP_API_KEY is this run's token):
 //   node scripts/clear-my-recovery-collateral.mjs            # report only
 //   node scripts/clear-my-recovery-collateral.mjs --resolve  # clear them
@@ -58,6 +112,7 @@
 // Exit codes: 0 = nothing to do, or every attempted hand-back succeeded.
 //             1 = at least one hand-back was refused.
 //             2 = misconfigured (missing env).
+//             3 = `--resolve` on a task-unbound run; nothing was attempted.
 
 import { partitionRecoveryCollateral } from './lib/quota-pause-collateral.mjs';
 
@@ -103,6 +158,25 @@ for (const e of boardOnly) {
 if (!mine.length) {
   console.log('nothing to hand back: no active pause-cancellation action names this agent as return owner');
   process.exit(0);
+}
+
+// A task-unbound run can hold a checkout but cannot attribute a cross-issue
+// write, so every resolve below would 403. Say so once, with the pending list,
+// instead of once per issue. See the header note for the full chain.
+const taskBound = Boolean(process.env.PAPERCLIP_TASK_ID);
+if (resolve && !taskBound) {
+  for (const e of mine) {
+    console.log(`pending ${e.identifier} (${e.status}) action=${e.recoveryActionId} run=${e.pausedRunId}`);
+  }
+  console.error(
+    `clear-my-recovery-collateral: refusing --resolve for ${mine.length} issue(s) — this run is ` +
+      'task-unbound (PAPERCLIP_TASK_ID is empty), and recovery-actions/resolve is a cross-issue ' +
+      'write that 403s with cross_issue_influence_run_context_required in that context. Sending ' +
+      'X-Paperclip-Run-Id does not help, and neither does checking the issue out first. Re-run ' +
+      'from a task-bound heartbeat. Do NOT release these checkouts — release unassigns the issue ' +
+      'and turns it into a board-only orphan.',
+  );
+  process.exit(3);
 }
 
 let refused = 0;
