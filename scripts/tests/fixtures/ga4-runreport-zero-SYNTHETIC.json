@@ -1,0 +1,11 @@
+{
+  "dimensionHeaders": [{ "name": "date" }, { "name": "eventName" }],
+  "metricHeaders": [{ "name": "eventCount", "type": "TYPE_INTEGER" }],
+  "rows": [
+    { "dimensionValues": [{ "value": "20260927" }, { "value": "page_view" }], "metricValues": [{ "value": "29" }] },
+    { "dimensionValues": [{ "value": "20260927" }, { "value": "install" }], "metricValues": [{ "value": "0" }] }
+  ],
+  "rowCount": 2,
+  "metadata": { "currencyCode": "USD", "timeZone": "America/Los_Angeles" },
+  "kind": "analyticsData#runReport"
+}

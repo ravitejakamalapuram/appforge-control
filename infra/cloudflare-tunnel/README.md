@@ -83,6 +83,16 @@ None of these need re-running `setup.sh`'s tunnel-creation step — only `cloudf
 `hostname:` field (or re-running `setup.sh` after templating that choice into `config.yml`) and
 restarting the LaunchAgent (`launchctl kickstart -k gui/$(id -u)/ing.paperclip.appforge-tunnel`).
 
+### Decision, 2026-09-30: use a subdomain of `echo-kit.com`
+
+The founder chose the faster route (option 1) so shipping is not blocked on buying a domain.
+`hooks.echo-kit.com` is a DNS record only, with no shared credentials or repos, and the hostname is a
+single setting, so moving to a dedicated domain later (option 2) is a re-run, not a redesign:
+
+```
+TUNNEL_HOSTNAME=hooks.echo-kit.com ./setup.sh     # creates the DNS route, regenerates config, restarts
+```
+
 ### After a hostname is chosen, wire up each product repo (starting with json-workbench)
 
 1. In the repo's GitHub settings → Secrets and variables → Actions, add:

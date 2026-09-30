@@ -65,9 +65,24 @@ if [ ! -f "$CREDS_PATH" ]; then
   cloudflared tunnel --origincert "$CERT_PATH" token --cred-file "$CREDS_PATH" "$TUNNEL_ID" >/dev/null
 fi
 
-TUNNEL_HOSTNAME="${TUNNEL_ID}.cfargotunnel.com"
+# The public hostname is ONE setting. Default is the tunnel's own cfargotunnel.com name, which does
+# NOT serve public HTTP (see README status). Set TUNNEL_HOSTNAME to a hostname in a zone this
+# Cloudflare account owns, e.g.  TUNNEL_HOSTNAME=hooks.echo-kit.com ./setup.sh
+# Changing domains later is a re-run with a different value; nothing else references it.
+TUNNEL_HOSTNAME="${TUNNEL_HOSTNAME:-${TUNNEL_ID}.cfargotunnel.com}"
 echo "Tunnel ID: $TUNNEL_ID"
 echo "Public hostname: $TUNNEL_HOSTNAME"
+
+case "$TUNNEL_HOSTNAME" in
+  *.cfargotunnel.com)
+    echo "WARNING: $TUNNEL_HOSTNAME is a CNAME target only and will not serve public HTTP." >&2
+    echo "         Re-run with TUNNEL_HOSTNAME=<host in your zone> (README: status section)." >&2
+    ;;
+  *)
+    echo "Routing DNS: $TUNNEL_HOSTNAME -> tunnel $TUNNEL_NAME (idempotent, overwrites a stale record)"
+    cloudflared tunnel --origincert "$CERT_PATH" route dns --overwrite-dns "$TUNNEL_NAME" "$TUNNEL_HOSTNAME"
+    ;;
+esac
 
 # --- 2. Fill in config.yml ----------------------------------------------------------------------
 CONFIG_PATH="${HERE}/config.yml"

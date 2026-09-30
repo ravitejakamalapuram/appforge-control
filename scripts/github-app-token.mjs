@@ -13,27 +13,81 @@ const CONTROL_ROOT = new URL('..', import.meta.url).pathname;
 const DEFAULT_CONFIG_PATH = `${CONTROL_ROOT}config/github-apps.yaml`;
 const OWNER = 'ravitejakamalapuram';
 
+// Two distinct failure exits, because the caller must treat them differently
+// (APP-132). A misconfiguration is deterministic and needs a human/agent fix,
+// so it stays fatal and loud. An unreachable api.github.com is transient and
+// must NOT take the agent run down with it: agent-launch.sh degrades to the
+// no-credential path on EX_TEMPFAIL and still starts the agent.
+const EXIT_PERMANENT = 1;
+const EXIT_TRANSIENT = 75; // sysexits.h EX_TEMPFAIL
+
+// Bounded: ~6s of retry total. Long enough to ride out a blip, short enough
+// that a real outage still surfaces quickly instead of stalling every run.
+const RETRY_DELAYS_MS = [500, 1500, 4000];
+
 function fail(message) {
   process.stderr.write(`github-app-token: ${message}\n`);
-  process.exit(1);
+  process.exit(EXIT_PERMANENT);
 }
 
+function failTransient(message) {
+  process.stderr.write(`github-app-token: ${message}\n`);
+  process.exit(EXIT_TRANSIENT);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function githubFetch(url, { method = 'GET', token, body } = {}) {
-  const res = await fetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (err) {
+    // undici throws (typically TypeError: fetch failed) for DNS, TLS and
+    // connection-level errors. Always transient - nothing about the request
+    // itself is wrong.
+    const wrapped = new Error(err.message);
+    wrapped.transient = true;
+    throw wrapped;
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`GitHub API ${method} ${url} failed: ${res.status} ${res.statusText} ${text}`.trim());
+    const err = new Error(`GitHub API ${method} ${url} failed: ${res.status} ${res.statusText} ${text}`.trim());
+    // 401/403/404 mean the App, key or installation is wrong - retrying just
+    // repeats the same answer. 429 and 5xx are the server asking us to wait.
+    err.transient = res.status === 429 || res.status >= 500;
+    throw err;
   }
   return res.json();
+}
+
+// Retries only the transient classes above, then exits with the code that tells
+// the caller which kind of failure it was.
+async function githubFetchOrExit(label, url, options) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await githubFetch(url, options);
+    } catch (err) {
+      if (!err.transient) fail(`${label}: ${err.message}`);
+      if (attempt >= RETRY_DELAYS_MS.length) {
+        failTransient(`${label}: ${err.message} (after ${RETRY_DELAYS_MS.length} retries)`);
+      }
+      const delay = RETRY_DELAYS_MS[attempt];
+      process.stderr.write(
+        `github-app-token: ${label}: ${err.message}; retrying in ${delay}ms ` +
+          `(${attempt + 1}/${RETRY_DELAYS_MS.length})\n`,
+      );
+      await sleep(delay);
+    }
+  }
 }
 
 async function main() {
@@ -76,12 +130,9 @@ async function main() {
 
   const appJwt = buildAppJwt({ appId: appEntry.app_id, privateKeyPem });
 
-  let installations;
-  try {
-    installations = await githubFetch(installationsUrl(), { token: appJwt });
-  } catch (err) {
-    fail(`could not list installations: ${err.message}`);
-  }
+  const installations = await githubFetchOrExit('could not list installations', installationsUrl(), {
+    token: appJwt,
+  });
 
   let installation;
   try {
@@ -90,16 +141,11 @@ async function main() {
     fail(err.message);
   }
 
-  let tokenResponse;
-  try {
-    tokenResponse = await githubFetch(accessTokenUrl(installation.id), {
-      method: 'POST',
-      token: appJwt,
-      body: { repositories: repoList },
-    });
-  } catch (err) {
-    fail(`could not mint installation token: ${err.message}`);
-  }
+  const tokenResponse = await githubFetchOrExit(
+    'could not mint installation token',
+    accessTokenUrl(installation.id),
+    { method: 'POST', token: appJwt, body: { repositories: repoList } },
+  );
 
   process.stdout.write(JSON.stringify({ token: tokenResponse.token, expires_at: tokenResponse.expires_at }) + '\n');
 }

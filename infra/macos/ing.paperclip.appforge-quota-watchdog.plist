@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Quota-retry watchdog (APP-45 / DEBT-0001), deployed per APP-164.
+
+  RUNS FROM THE INSTALLED PREFIX, NOT THE SHARED CHECKOUT.
+  ProgramArguments used to name
+  /Users/rkamalapuram/git-personal/appforge-control/scripts/quota-retry-watchdog.mjs
+  directly. Every agent on this box does ordinary git work in that checkout, so
+  the daemon executed whatever branch happened to be checked out there - on
+  2026-09-29 that was an unmerged feature branch. Same defect as APP-137 for the
+  launcher; same fix: scripts/install-runtime-launcher.sh materialises the
+  watchdog and its two libs into ~/.appforge from a named, published ref, and
+  this plist points at that copy.
+
+  THE THREE PINNED PATHS BELOW ARE LOAD-BEARING. Do not delete them to "clean
+  up". The watchdog derives its defaults from its own location
+  (REPO_ROOT = <script dir>/..), so running from ~/.appforge/bin would otherwise
+  silently relocate all three:
+
+    state-file          -> ~/.appforge/state/...   An empty state file means an
+                           empty handled-run set, so the next tick re-handles
+                           every run still inside the lookback window: duplicate
+                           pauses, resumes and wakes for agents already dealt
+                           with.
+    log-file            -> ~/.appforge/logs/...    Splits the operational trail
+                           in two with no pointer between them.
+    CLAUDE_CONFIG_DIR   -> ~/.appforge/.claude-appforge, which does not exist.
+                           This is the credential directory the bundled
+                           `paperclipai` CLI authenticates from; without it every
+                           pause, resume and wake this daemon performs fails.
+
+  All three are gitignored (state/, *.log, .claude-appforge/), so unlike the
+  code they were never at risk from a stray `git checkout`. They stay where they
+  are deliberately: relocating live operational state is a separate migration,
+  not a side effect of deploying code.
+
+  Reload after an install (the daemon does NOT pick up a new path on its own):
+    launchctl bootout  gui/$(id -u)/ing.paperclip.appforge-quota-watchdog
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ing.paperclip.appforge-quota-watchdog.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/rkamalapuram</string>
+		<key>CLAUDE_CONFIG_DIR</key>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/.claude-appforge</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control</string>
+	<key>ExitTimeOut</key>
+	<integer>120</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>ing.paperclip.appforge-quota-watchdog</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/node</string>
+		<string>/Users/rkamalapuram/.appforge/bin/quota-retry-watchdog.mjs</string>
+		<string>--once</string>
+		<string>--state-file</string>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/state/quota-retry-watchdog-state.json</string>
+		<string>--log-file</string>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/logs/quota-retry-watchdog.log</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>90</integer>
+	<key>StandardErrorPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/quota-retry-watchdog.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/quota-retry-watchdog.out.log</string>
+</dict>
+</plist>

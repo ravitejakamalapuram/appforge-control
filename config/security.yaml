@@ -36,6 +36,68 @@ thresholds:
   secret_scan: gitleaks
   deps: [npm-audit, osv-scanner]
 
-# §16.2: SEV0/SEV1 notify the founder immediately (ntfy high priority for
-# SEV0); SEV2 goes in the daily report; SEV3 in the weekly.
-notify_founder: [SEV0, SEV1]
+# §16.2 — CORRECTED 2026-09-28 (APP-78, from APP-73). The original text here read
+# "SEV0/SEV1 notify the founder immediately (ntfy high priority for SEV0)". That
+# described a channel that does not exist: `config/company.yaml` has
+# `founder_notify: null` and ntfy.sh was never provisioned (§28 lists it as
+# planned). A policy asserting a notification that silently does not fire is the
+# same class of defect as a containment claim that is not enforced — and worse,
+# because it fails at exactly the moment it was supposed to work.
+#
+# What actually happens today: nothing pages anyone. A SEV0/SEV1 reaches the
+# founder only when they next open the board approvals queue — latency is
+# "whenever the founder next looks", which on a work laptop can be many hours or
+# a weekend. Plan incident response around that, not around a push alert.
+#
+# So this key now names the queue that exists. Do NOT restore an ntfy reference
+# here until a real topic is provisioned, and do NOT guess a topic name — the
+# placeholder in company.yaml says so, and an unguessable topic is the founder's
+# to create. Tracked separately; see APP-78's follow-up.
+notify_founder_channel: board_approval_queue   # the only channel that exists
+notify_founder_latency: unbounded              # no push; founder-poll only
+notify_founder: [SEV0, SEV1]                   # severities that MUST reach the founder
+
+# ---------------------------------------------------------------------------
+# CONTAINMENT — read before changing how this instance is reached
+#
+# The OS uid is the ONLY agent containment boundary. The control plane does NOT
+# contain agents: Paperclip runs with `server.deploymentMode = "local_trusted"`
+# in ~/.paperclip/instances/default/config.json, and in that mode the auth
+# middleware defaults every request's actor to board/instance-admin BEFORE it
+# examines any credential. Measured read-only 2026-09-28: a GET of this
+# company's issue list with no Authorization header returned 200 and every
+# issue. Deny lists in agents/*/TOOLS.md and APPFORGE_AGENT_REPOS=none are
+# cooperative; the per-run cross-issue write cap and the run-attribution audit
+# trail bind credentialed writes only. Ruling: DEC-0016 (APP-73, board approval
+# e028e2f9). Full model: docs/containment-model.md.
+#
+# Same category, added APP-134 (measured 2026-09-29): appforge-brain's
+# `board-approved` label gate in .github/workflows/pr-checks.yml is an ADVISORY
+# CHECK RUN, not a merge block. `main` reads protected: false and
+# required_status_checks.enforcement_level: "off" on both brain and control, and
+# rulesets are unavailable on this plan for a private repo (403 "Upgrade to
+# GitHub Pro or make this repository public" here vs 200 [] on the account's
+# public repo appforge-kit, same token). Neither repo has server-side merge
+# gating; brain just has a check that shouts. The gate has never been bypassed,
+# but that is agent discipline, not the server. Do not describe it as enforced.
+# Company-wide the picture splits by visibility, not by repo: rulesets 403 on all
+# 5 private repos in APPFORGE_AGENT_REPOS and return 200 on all 6 public ones,
+# where json-workbench already carries an active `protected-main` ruleset
+# (deletion + non_fast_forward only - history, not merges). So it is a spend
+# question for the private repos and merely unconfigured for the public ones.
+# Either way it is a founder call, tracked on APP-123, NOT an engineering task.
+# Not verified: release-platform and InvTrack, which no agent token reaches.
+#
+# >>> REVISIT TRIGGER — DEC-0016 IS VOID IMMEDIATELY IF ANY OF THESE IS TRUE <<<
+#   1. `server.bind` is no longer `loopback`, or `server.host` is no longer
+#      `127.0.0.1` (i.e. the instance is reachable off this host).
+#   2. This machine becomes multi-user, or a second person gets agent access.
+#   3. `server.deploymentMode` changes from `local_trusted`.
+# Any of these requires re-scoping `deploymentMode: authenticated` as a BOARD
+# APPROVAL before agents continue running. The whole accepted-risk position
+# rests on single-user + loopback; remove either and it is not accepted risk any
+# more, it is an open control plane on a network.
+#
+# Migration to `authenticated` is DEFERRED (declined on APP-73), not in
+# progress. Do not schedule or plan around it.
+# ---------------------------------------------------------------------------

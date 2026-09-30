@@ -5,13 +5,13 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>CLOUDFLARE_R2_API_TOKEN</key>
-		<string>cfut_9GFiY8VeBYRclbgbxh9hbdcJsxF0t6s6n49Nqd0577d14be1</string>
+		<string>__CLOUDFLARE_R2_API_TOKEN__</string>
 		<key>CLOUDFLARE_ACCOUNT_ID</key>
 		<string>e08ac904468d19ea525b3005cc54888b</string>
 		<key>HEALTHCHECKS_PING_URL_BACKUP</key>
-		<string>https://hc-ping.com/bd69bdde-35f3-46a3-927e-4b96a77f1fd3</string>
+		<string>__HEALTHCHECKS_PING_URL_BACKUP__</string>
 		<key>NTFY_TOPIC</key>
-		<string>appforge-founder-SGVuqZoj2f3PbnOI</string>
+		<string>__NTFY_TOPIC__</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 		<key>HOME</key>

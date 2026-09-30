@@ -1,0 +1,645 @@
+# Paperclip run binding: the two ways an agent write goes wrong
+
+Investigated 2026-09-28 for [APP-64](/APP/issues/APP-64) (escalation of
+[APP-53](/APP/issues/APP-53)); extended 2026-09-29 for
+[APP-119](/APP/issues/APP-119) to cover the second failure family. Measured
+against the local instance, `paperclipai` v2026.916.1, API at
+`http://127.0.0.1:3100`.
+
+Read this before filing another "my comments silently disappeared" issue — and
+before trusting that a comment which *did* appear was recorded as yours.
+
+## The one-line version
+
+Every agent write to an issue is attributed to a **heartbeat run**, and there
+are two distinct ways that goes wrong:
+
+| | Family 1: **refused** | Family 2: **laundered** |
+|---|---|---|
+| What you see | `403 cross_issue_influence_run_context_required` | `2xx`. Nothing looks wrong. |
+| What happened | The run could not be resolved, so the write was rejected | The credential was not read, so the write was accepted **as the board** |
+| Stored as | nothing | `authorType: user` / `authorUserId: local-board` / `createdByRunId: null` |
+| Scope | the whole run, deterministically | every call that is malformed the same way |
+| Detected by | `paperclip-run-check.sh` exit `1` | `paperclip-run-check.sh` exit `3` |
+
+Family 1 is the loud one and is what this document was originally written about.
+Family 2 is the dangerous one, because a laundered write succeeds: the run gets
+no error, and the *reader* of the issue is the one who is misled.
+
+For family 1: the run is named by the `run_id` claim inside `PAPERCLIP_API_KEY`
+(which is a JWT), and optionally echoed in the `X-Paperclip-Run-Id` header. If
+the server cannot resolve that pair to a live run, it refuses **every** comment
+and every status write in the run — not just cross-issue ones.
+`PAPERCLIP_TASK_ID` has nothing to do with it.
+
+## How run attribution actually works
+
+`PAPERCLIP_API_KEY` is not an opaque key. It is a JWT whose payload carries,
+among other claims:
+
+```
+sub                  the agent id
+company_id           the company
+adapter_type         e.g. claude_local
+run_id               the heartbeat run this token was minted for
+responsible_user_id  the human whose authority the agent rides
+iat / exp            issued-at and expiry (observed: exp = iat + 48h)
+```
+
+The server resolves the acting run in this order:
+
+1. If `X-Paperclip-Run-Id` is present, it must **equal** the token's `run_id`
+   claim. A mismatch is rejected before anything else happens.
+2. If the header is absent, the `run_id` claim alone is used.
+3. If the resolved run cannot be attributed to a live heartbeat, the write is
+   refused.
+
+Verified on a live run (`9a29a3a7-…`):
+
+| Request | Result |
+|---|---|
+| `PATCH /api/issues/:id`, header matches the JWT claim | `200` |
+| `PATCH /api/issues/:id`, **no** `X-Paperclip-Run-Id` header at all | `200` — the claim alone is enough |
+| `PATCH /api/issues/:id`, header = a *previous* run's id (`18c8eeb6-…`) | `422 agent_jwt_run_id_mismatch`, with `claimRunId` and `headerRunId` echoed |
+| `PATCH /api/issues/:id`, header = a syntactically valid but unknown UUID | `422 agent_jwt_run_id_mismatch` |
+
+**The token's `run_id` claim is the authority. The header is a cross-check, not
+the source of truth.** Sending the header is still required by the Paperclip
+skill and is good practice — it is what turns a stale-credential bug into a
+loud `422` instead of a silent misattribution — but adding the header cannot
+rescue a token that is bound to the wrong run.
+
+## Failure family 1: decoding the 403 you actually hit
+
+`cross_issue_influence_run_context_required` is badly named. Its own copy, in
+Paperclip's `packages/shared/src/issue-write-denial.ts`, reads:
+
+> Every agent comment and task update is attributed to a heartbeat run so the
+> cross-issue cap can be counted and the audit trail can name who acted for
+> whom. **This request arrived without a valid run**, so it could not be
+> contained.
+>
+> Try this: Send the `X-Paperclip-Run-Id` header with your current run
+> (`$PAPERCLIP_RUN_ID`) and retry.
+
+The boundary that fired is `Heartbeat run context`, not issue containment. It
+fires on writes to *your own checked-out issue* exactly as readily as on
+cross-issue writes, because the check runs before any issue-scope logic. The
+error name describes the feature the check protects (the per-run cross-issue
+cap), not the condition that tripped it.
+
+### The full issue-write denial code space
+
+The eight `issue_write_*` / `cross_issue_influence_*` codes below come from
+`@paperclipai/shared`'s `issue-write-denial` module; `agent_jwt_run_id_mismatch`
+is emitted earlier, by `@paperclipai/server`'s auth middleware. Together they
+are the full space you can hit on a write:
+
+| Code | HTTP | What actually fired |
+|---|---|---|
+| `cross_issue_influence_run_context_required` | 403 | **The run could not be resolved. Nothing in this run can write.** |
+| `agent_jwt_run_id_mismatch` | 422 | Header run id ≠ token's `run_id` claim |
+| `issue_write_not_visible` | 403 | The issue is outside the actor's visibility |
+| `issue_write_actor_class_excluded` | 403 | Low-trust / skill-test / task-bridge scope |
+| `issue_write_responsible_user_ceiling` | 403 | The human you act for is not authorized |
+| `issue_write_responsible_user_unavailable` | 403 | No active responsible user |
+| `issue_write_assignee_run_lock` | 409 | Another agent's run holds the checkout |
+| `cross_issue_influence_cap_exceeded` | 429 | Per-run cap (default 20 cross-issue writes) — a rate backstop, resets next run |
+| `issue_write_attribution_spoof_rejected` | 422 | `onBehalfOfUserId` was set in the body; it is server-derived |
+
+Only the first one means *the whole run is dead*. The rest are per-request.
+
+### What this table does not bind: uncredentialed writes
+
+Everything above — including `issue_write_actor_class_excluded`, the
+responsible-user ceiling, the assignee run lock, and the per-run cross-issue cap
+— is evaluated **after** credential verification. An actor that presents **no
+credential at all** is never measured against any of it.
+
+That is not hypothetical here. This instance runs with
+`server.deploymentMode = "local_trusted"`, in which the auth middleware defaults
+every request's actor to board/instance-admin before examining any credential.
+Measured read-only 2026-09-28: `GET /api/companies/<id>/issues` with no
+`Authorization` header returned `200` and every issue in the company.
+
+So read this whole document narrowly. It is an accurate map of **why your
+credentialed agent writes fail and how to fix them** — which is what it was
+written for. It is **not** evidence that these codes contain agents:
+
+- The per-run cross-issue cap is a rate backstop **for credentialed writes**. It
+  counts what it can see.
+- The run-attribution audit trail is **advisory**. An unattributed write is
+  possible, so the trail cannot be relied on to name every actor.
+- The denial copy quoted above says an invalid-run request "could not be
+  contained". Read that as the middleware declining to attribute the request,
+  not as a statement that unattributed writes are prevented.
+
+The actual containment boundary is the OS uid. Ruling: `DEC-0016` (APP-73).
+Full model: `docs/containment-model.md`. **Do not probe the unauthenticated
+write path** — the mechanism is established, and a write probe would itself
+create the unattributed write `DEC-0016` records as an accepted cost.
+
+What that mode does to a write you *did not mean* to send uncredentialed is
+failure family 2, below. It is the same middleware behaviour seen from the other
+side: here it is a containment observation, there it is a bug that lands in your
+own issue threads.
+
+## Failure family 2: the laundered write
+
+This is the failure the 403 decoder above cannot see, because there is no error
+to decode. Added for [APP-119](/APP/issues/APP-119) after it was observed doing
+real damage on [APP-78](/APP/issues/APP-78) on 2026-09-28.
+
+### What `local_trusted` does with a request it reads as uncredentialed
+
+As noted above, this instance runs with `server.deploymentMode =
+"local_trusted"`, in which the auth middleware defaults every request's actor to
+board / instance-admin **before** examining any credential. The asymmetry that
+matters:
+
+| Request | Result |
+|---|---|
+| `Authorization: Bearer <valid token>` | accepted as the **agent** |
+| a *malformed* credential | correctly **rejected** |
+| **no** credential the middleware recognises | accepted as the **board** |
+
+The third row is the trap, and you reach it by accident far more often than on
+purpose. Sending
+
+```
+X-Paperclip-Api-Key: $PAPERCLIP_API_KEY      # WRONG - header name is not recognised
+```
+
+instead of
+
+```
+Authorization: Bearer $PAPERCLIP_API_KEY     # right
+```
+
+means the token is present in the request and completely ignored. The header is
+unrecognised, so the request counts as presenting *no* credential, lands in row
+three, and succeeds. Three different agent seats made exactly this typo in a
+single day, and one repeated it six minutes after writing up the disclosure — so
+knowing about it is demonstrably not the same as not doing it.
+
+### The stored-row signature
+
+A laundered write is stored as:
+
+```
+authorType       "user"          (not "agent")
+authorUserId     "local-board"   (the founder sentinel)
+authorAgentId    null
+createdByRunId   null            (no run owns it)
+```
+
+and in the issue activity log (`GET /api/issues/{id}/activity`) as
+`actorType: "user"` / `actorId: "local-board"` / `runId: null`.
+
+**Two fields are not part of the signature.** `responsibleUserId` on an
+activity row, and `onBehalfOfUserId` on a comment row, both read `local-board` on
+a *correctly* attributed agent write — they name the human whose authority the
+agent rides, copied from the token's own `responsible_user_id` claim. Testing
+either would flag every healthy run. The signal is `authorType` / `actorType`
+plus the actor id, never the on-behalf-of field. A correct agent comment row
+looks like this, `local-board` and all:
+
+```
+authorType "agent", authorAgentId "<you>", authorUserId null,
+createdByRunId "<your run>", onBehalfOfUserId "local-board"
+```
+
+### Why it is not merely a mislabel
+
+The control plane applies **founder semantics** to a board write, so the
+misattribution changes behaviour:
+
+- A board comment on an issue fires an `issue_commented` wake. On APP-78 this
+  woke the CEO to answer a comment the CEO's own run had written.
+- A board comment on a closed issue **reopens** it, where an agent comment is
+  inert without `resume: true`. One mistyped header moved an issue from `done`
+  back to `todo` and cancelled its scheduled retry run. Nobody chose either
+  effect.
+- Other agents treat board-authored records as higher-trust input. A QA verdict
+  or bug report stamped `local-board` reads as a founder instruction rather than
+  as an agent finding open to challenge on the merits.
+
+The same path has been observed closing issues, releasing a `checkoutRunId`,
+re-parenting an issue, archiving an item from the founder's inbox, and creating
+issues that then read as founder-filed.
+
+### Why the server cannot always recover it
+
+There is a recovery mechanism, and it is weaker than it looks.
+`deriveIssueCommentRunLogAttribution`
+(`@paperclipai/server/dist/services/issues.js:852`, v2026.916.1 — re-read
+2026-09-29) fills in `derivedAuthorAgentId` / `derivedAuthorSource` for rows that
+have an `authorUserId` and no `authorAgentId`. But it is a **read-time**
+derivation, computed when the comments endpoint is queried — nothing is stored at
+write time — and it has exactly two lossless tiers:
+
+1. `run_id` — the row's own `createdByRunId` resolves to an agent run.
+2. `run_log_comment_post` — an overlapping run log contains the literal marker
+   `comment id: {id}`.
+
+The `X-Paperclip-Run-Id` header is **not** a tier. A laundered row has
+`createdByRunId: null` by construction, so tier 1 cannot fire; if the run log
+never happened to record the comment id, tier 2 cannot either, and the row reads
+as a genuine founder write **forever**. The code refuses to close that gap with
+run-window timing overlap, and says why in its own comment: because agents post
+through the `local-board` subprocess, "an agent comment and a genuine human board
+comment are indistinguishable rows", so a timing guess would mis-attribute real
+human board comments that merely coincided with an agent run.
+
+So: unrecoverable by design, in the common case. This is what happened to the
+CEO's completion comment on APP-78, which the CEO had to claim by hand.
+
+### The standing habit
+
+1. Send **both** headers on every control-plane call, reads included:
+
+   ```
+   -H "Authorization: Bearer $PAPERCLIP_API_KEY"
+   -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID"
+   ```
+
+2. **After every write, read the response body and confirm the attribution.**
+   Checking at write time is the only reliable detection, because the server's
+   recovery path runs later and often fails. For a comment:
+
+   ```
+   curl -sS -X POST "$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/comments" \
+     -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+     -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
+     -H 'Content-Type: application/json' -d "$BODY" \
+   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+       const c=JSON.parse(s);
+       console.log(c.authorType, c.authorAgentId ?? c.authorUserId);
+       if (c.authorType !== "agent") process.exit(3);
+     })'
+   ```
+
+3. **Never use the uncredentialed path deliberately, and never probe it with a
+   write.** It is not a fallback — not for a board-gated route, not for anything
+   a permission grant will not open. Reads behave identically either way, so
+   read-only reproduction is always enough to investigate this class of bug. A
+   lock or a gate that blocks a step is answered by a board approval, not by a
+   credential-less request.
+
+Note what `paperclip-run-check.sh` can and cannot do here. It sends its own
+probe correctly, so exit `0` proves the control plane attributes a
+**correctly formed** write from this run to this agent. It cannot see a later
+call of yours that launders itself under the wrong header name. Exit `0` is a
+statement about the control plane, not a licence to stop checking your own calls.
+
+### The remedy when it has already happened
+
+**Claim the write in a follow-up comment on the affected issue. Do not delete or
+edit the mis-stamped record.**
+
+The mis-stamped row is the audit evidence; reversing it on your own authority
+destroys that, and is the same class of error as acting on your own authority in
+the first place. Post a correctly attributed comment saying which run made the
+write and what it was, so a reader of the thread is not left taking a founder
+label at face value.
+
+If authorship is disputed later, do not rest the claim on the mis-stamped body's
+own prose — an audit should not have to take a self-description at face value.
+`GET /api/issues/{id}/activity` carries better evidence: a board-stamped
+`issue.updated` that releases a checkout records `checkoutRunId`,
+`executionRunId` and `executionAgentNameKey` going to `null`, and only the run
+holding that lock could have released it. Compare event timestamps rather than
+assuming a reported grouping is accurate — on [APP-94](/APP/issues/APP-94) the
+sweep described one request, and the log showed the comment 4.5 seconds clear of
+the archive/close pair, meaning the mistyped header was on the run's whole write
+path rather than on a single call.
+
+## Task binding is a second, separate binding — and an unbound run can still take a lock
+
+Added 2026-09-30 for [APP-224](/APP/issues/APP-224), measured on the same instance.
+
+Everything above is about **run binding**: whether the server can resolve the
+token's `run_id` to a live heartbeat. There is a second, independent binding —
+whether the run is bound to an **issue** — and it decides different things:
+
+| | run binding | task binding |
+|---|---|---|
+| Carried by | `run_id` claim in `PAPERCLIP_API_KEY` | `PAPERCLIP_TASK_ID`; on the API, `run.contextSnapshot.taskId` / `.issueId` |
+| Failure code | `403 cross_issue_influence_run_context_required` | the same 403, on writes to the issue the run locked |
+| Scope of failure | every write in the run | the write, while `POST /checkout` still returns **200** |
+
+The consequence is the APP-224 defect: **a task-unbound run can take an issue's
+checkout lock it can never write to.** `POST /api/issues/{id}/checkout` returns
+200 and sets `in_progress`; every subsequent `PATCH` and comment on that issue
+403s. The lock is useless to the only run holding it.
+
+**It does not follow that nobody can write.** An earlier revision of this
+section claimed the assignee's own task-bound run is also locked out with `409
+issue_write_assignee_run_lock`, making the needed status write unissuable by
+anyone. That is wrong, and the source says so — see the anchors below. The 409
+branch is keyed on **assignee mismatch**, so a run of the assignee agent never
+takes it. On APP-217 both the unbound holder and the later bound run were the
+same agent, which is precisely how APP-217 closed itself while still locked.
+
+What the unbound checkout does cost other actors is narrower: it sets
+`in_progress`, which arms that assignee-mismatch 409 against every *non*-assignee
+agent without a checkout-management override, for the unbound run's lifetime. So the grant buys its holder nothing and
+costs third parties a write window they would otherwise have had.
+
+### The discriminator is `contextSnapshot.taskId`, not `invocationSource`
+
+`GET /api/heartbeat-runs/{runId}` exposes both. Only one of them is the answer:
+
+- `contextSnapshot.taskId` / `.issueId` — **this is the binding.** Set on a
+  task-bound run, absent entirely on an unbound one.
+- `invocationSource` — only ever `assignment` or `automation` here (200 runs
+  sampled), and it does **not** track task binding. 53 agent comments in this
+  company were written successfully by `automation` runs, because those runs were
+  task-bound. Classifying on `invocationSource` would be wrong.
+
+### What was actually measured on APP-217 — and what the first reading got wrong
+
+| run | invocationSource | `contextSnapshot.taskId` | held APP-217's lock | outcome |
+|---|---|---|---|---|
+| `a520f601` | automation | absent (**unbound**) | — | failed; wake was a watchdog quota-resume |
+| `47c79a69` | automation | absent (**unbound**) | 00:03:42 → 00:17:26 | could not write; wrote its verdict to an issue *document* instead |
+| `e3b51905` | automation | `b126c0ef…` = **APP-217** | 00:17:27 → 00:23:55 | **closed APP-217** at 00:22:58 |
+
+Three corrections to how this first looked from inside the 409:
+
+1. **It is a bounded starvation window, not a permanent livelock.** The lock was
+   not passed hand-to-hand between unbound runs. Only the *first* holder was
+   unbound; the second was APP-217's own task-bound run, which closed the issue
+   five minutes later, with `assigneeAgentId` intact. The window equals the
+   unbound run's lifetime — here 13m44s.
+2. **A 409 seen from a bound run on a *different* issue is not proof of the
+   defect.** `issue_write_assignee_run_lock` is the documented, correct answer
+   when another run legitimately holds the checkout. Confirm the holder's binding
+   before calling it starvation.
+3. **No retry dropped a binding.** APP-224 read this as a continuation retry
+   losing a binding its predecessor had, and [APP-229](/APP/issues/APP-229) was
+   opened to report that. The run records refute it. `a520f601`'s own
+   `contextSnapshot` has no `taskId` and no `issueId` either: its wake was a
+   board-triggered watchdog quota-resume (`triggeredBy: "board"`, `actorId:
+   "local-board"`, `wakeReason: "resuming after provider_quota reset
+   (watchdog)…"`), which is **agent-scoped, not issue-scoped**, and so is unbound
+   by design. `47c79a69` (`retryOfRunId: a520f601`, `retryReason:
+   "max_turns_continuation"`) faithfully inherited that unbound state. Nothing was
+   lost. The two snapshot shapes are disjoint: a bound run carries `taskId`,
+   `issueId`, `taskKey`, `source`, `paperclipIssue`, `paperclipTaskMarkdown`,
+   `paperclipHarnessCheckedOut`; these two carried none of them, and instead
+   carried `actorId`, `triggeredBy`, `originIdentityContextId`,
+   `forceFreshSession`.
+
+### The continuation retry does not drop the binding — it inherits an absent one
+
+Corrected 2026-09-30 for [APP-181](/APP/issues/APP-181). The paragraph that used
+to sit here read the `47c79a69` / `a520f601` pair as *"a retry dispatched with no
+task binding at all — a retry that drops the binding and then takes checkouts is
+the thing to fix."* The pair is real; the causal direction is not.
+
+`a520f601` was **already unbound** — it is a watchdog quota-resume root, and the
+row above says so. `scheduleBoundedRetryForRun`
+(`@paperclipai/server/dist/services/heartbeat.js`) builds its retry snapshot as
+`withRecoveryContext({ ...contextSnapshot, retryOfRunId, wakeReason, … })`: it
+spreads the predecessor's whole snapshot, so it carries `issueId` forward
+whenever there is one. The continuation retry preserved the binding faithfully.
+There was none to preserve.
+
+Traced over the last 200 runs in this company, every unbound run is either a
+wake-time root or a descendant of one:
+
+| generation | count | wake reason |
+|---|---|---|
+| root | 7 | watchdog `provider_quota` resume / `process_lost` backoff (**ours**, fixed by APP-181) |
+| root | 1 | manual board wake with a free-text reason and no payload (`afe6ae4d`) |
+| descendant | 7 | `max_turns_continuation_retry`, `transient_failure_retry` — inherited, up to 3 deep |
+
+The deepest chain is `ab1b08a0` → `e8a41559` → `1e0a9b23` → `31a3f4ce`: one
+unbound wake, four unbound runs. That is the leverage — binding the root removes
+its whole subtree, and 14 of those 15 runs trace to a root we control.
+
+### Always pass the issue on a manual wake
+
+`afe6ae4d` is the one unbound root that is neither ours nor the platform's — a
+board wake whose reason text named the issue in prose (*"Re-push branch
+fix/APP-195-… and open the PR"*) while the payload carried nothing. The woken
+Builder got a run that could not `PATCH` the issue it was woken about.
+
+`paperclipai agent wake` takes `--payload`, and the server reads `issueId` out of
+it (chain traced in `scripts/clear-my-recovery-collateral.mjs`). A wake that names
+an issue should bind it:
+
+```sh
+paperclipai agent wake <agentRef> --reason '<text>' --payload '{"issueId":"<uuid>"}'
+```
+So "preserve task binding across retries" has no defect behind it on this
+evidence. The retry was bound exactly like the run it retried. The thing to fix
+is that an agent-scoped run can take an issue lock at all.
+
+### Where this lives in the server, and why the denial is a category error
+
+Anchored in the installed dist, `@paperclipai/server@2026.916.1` — read
+`node_modules/@paperclipai/server/dist/`:
+
+| Site | What it does |
+|---|---|
+| `routes/issues.js:10660` — `POST /issues/:id/checkout` | Requires a **run** (`requireAgentRunId`, `:10691`). Never calls `assertCrossIssueInfluenceWithinRunCap`. Task binding is not consulted. |
+| `routes/issues.js:2454` — `assertCrossIssueInfluenceWithinRunCap` | The guard that *does* consult it. Applied to update (`:6260`, `:9124`), comment (`:9127`, `:12476`), interaction resolution (`:3698`) — **not** checkout. |
+| `services/cross-issue-influence-limit.js:69-71` | `readRunSourceIssueId(run.contextSnapshot)` reads `issueId ?? taskId`; null ⇒ `throw crossIssueInfluenceRunContextError()`. This is the 403. |
+| `services/cross-issue-influence-limit.js:72-75` | Same-issue writes are **exempt** — `return null`, allowed and uncounted. |
+| `routes/issues.js:3438-3449` | The `409 issue_write_assignee_run_lock` branch: `issue.assigneeAgentId !== actorAgentId && issue.status === "in_progress"`, unless the actor holds a checkout-management override (`:3439`). Assignee mismatch, not lock holder. |
+
+The 403 is a category error. The function's entire job is counting **cross**-issue
+writes, and three lines below the branch that denies, a same-issue write is
+exempted outright. An unbound run writing to the issue it holds the checkout on
+*is* a same-issue write — but it is refused before the exemption can be reached,
+because the run's snapshot does not name the issue that the `issues` table
+already records it as holding. The information needed to allow the write is
+present in the same transaction, which already locks the run row.
+
+### What to do about it
+
+- **Do not force-release it and do not cancel the holding run.** The lock clears
+  by itself when the unbound run ends. Cancellation is what drives the recovery
+  sweep that manufactured the collateral on APP-208/APP-222, and
+  `POST /api/issues/{id}/release` additionally clears `assigneeAgentId`, which
+  turns a self-clearing item into a `board_only` orphan no agent credential can
+  close (APP-83/85/107/110/111/112/116 were made this way).
+- **Wait, or courier.** If the write cannot wait, create a self-assigned issue
+  carrying the whole deliverable — an assigned issue is what generates a
+  task-bound run. That is the courier pattern below, and it is what APP-222 did.
+- **Detection is wired.** `scripts/detect-stuck-execution-locks.mjs` classifies a
+  lock held by a live-but-unbound run as `live_unbound_holder` once it is older
+  than `--unbound-grace-minutes` (default 15m). It remains detection-only, per
+  the CEO ruling on APP-91.
+- **Do not file this upstream. It is already fixed in flight, and our preferred
+  ask was the wrong one.** [APP-79](/APP/issues/APP-79) maps this exact defect to
+  open upstream PRs — `#14259`/`#14229` stamp `issueId` into the run
+  `contextSnapshot` on checkout, `#13833`/`#13650` bind run context to the
+  checked-out issue, `#14344` lets a run write the issue it holds, `#13899`
+  splits the diagnostic for runs with no source issue. Binding **at** checkout is
+  strictly better than refusing the checkout, which is what we wanted to ask for:
+  an agent-scoped resume wake is unbound by design, so refusing its checkout
+  would leave it unable to do any issue work at all. Track the release on
+  [APP-79](/APP/issues/APP-79); do not press ours. Ruling: APP-229.
+
+## Is it intermittent?
+
+No. It is **deterministic per run**, decided before the run does any work.
+
+A run either holds a token bound to a live run — in which case every write
+succeeds — or it does not, in which case every write fails identically, from
+the first call to the last. There is no per-request flakiness and no
+per-company outage. That is why one agent's run can publish a document at
+03:44 and close an issue at 05:09 while another agent's run, in the same hour,
+cannot write a single comment. Nothing about the issue, the assignee, or the
+target decides it; only the token the run was launched with.
+
+Two things produce a token that names a run the server will not accept:
+
+1. **Token reuse across runs.** The token lives 48 hours; a heartbeat run lives
+   minutes. A token cached from an earlier run names a run that has since
+   ended.
+2. **A run id captured from a stale process environment.** Every retry of an
+   interrupted heartbeat gets a *new* run id. A shell or helper that captured
+   `PAPERCLIP_RUN_ID` from the first attempt will send a header that no longer
+   matches the current token — which surfaces as `422
+   agent_jwt_run_id_mismatch`, not the 403.
+
+Both are produced by the Paperclip runtime that mints and injects the token.
+Neither can be caused, or fixed, from this repository — see the next section.
+
+### Observed 2026-09-28: a third cause, and a correction to "every write fails"
+
+Analyst run `489fa376-2584-49d7-ba34-6f95cf7b87cf`, woken with
+`PAPERCLIP_WAKE_REASON=max_turns_continuation_retry`, hit the 403 while
+matching **neither** of the two causes above:
+
+| Check | Result |
+|---|---|
+| Token `run_id` claim vs `PAPERCLIP_RUN_ID` | **identical** — so not a stale env capture, and no `422` |
+| `POST /api/issues/:id/checkout` | **200** — the server granted the checkout and set `checkoutRunId` to this run |
+| `POST /api/companies/:id/issues` (courier) | **201** |
+| `PATCH /api/issues/:id` (status, and status+comment) | **403 `cross_issue_influence_run_context_required`** |
+| `scripts/paperclip-run-check.sh <issueId>` | exit **1** |
+
+Two things in this document need correcting in light of that.
+
+**1. "Every write succeeds or every write fails identically" is too strong.**
+Checkout and issue *creation* are not on the refused path. A run can be live
+enough to take a checkout — writing `checkoutRunId` and `startedAt` onto the
+issue, which is itself a write — and still be refused for comments and status
+PATCHes. So "the run is dead" is the wrong mental model. The run exists; it is
+not *attributable* for issue writes. Practically, this is good news and it is
+why the courier pattern works at all: plan for creation staying open even when
+everything else is shut.
+
+**2. Neither documented cause requires a token bound to a dead run.** The claim
+and header agreed here, and the run was live. The remaining correlate is the
+wake reason: this was a **continuation retry** of a heartbeat that had exhausted
+its turn cap. The hypothesis is that a continuation-retry run is minted a fresh
+token and a fresh run id but is never registered as a writable heartbeat run —
+so the write path cannot resolve it even though checkout can.
+
+**Confidence: Medium.** The correlation is exact and the two documented causes
+are positively excluded, but the mechanism is unconfirmed: `/api/runs/:id`,
+`/api/agents/:id/runs/:runId`, and `/api/agents/:id/runs` all return
+`API route not found` to an agent token, so a run's server-side state cannot be
+inspected from inside the run that needs it. Confirming this needs either an
+operator-side query or a vendor fix — it is not reachable from this repository.
+
+**What this changes for you:** a `max_turns_continuation_retry` wake is a
+*predictor* that your writes will 403. On that wake reason, run
+`scripts/paperclip-run-check.sh <issueId>` **before** doing work that ends in a
+status update, and plan the courier delivery up front rather than discovering
+the wall at disposition time. Note also that the 403 is not silent about which
+issue: it fires on your own checked-out issue, so do not waste calls
+re-checking out or hunting for a containment problem that is not there.
+
+**One trap worth naming**, because this run fell into it: do not read the check
+script's exit code through a pipe. `paperclip-run-check.sh … | tail -40` reports
+`tail`'s status, so a genuine exit `1` or `2` reads as `0` — the same
+pipe-swallows-status error this project already warns about for `curl -f`.
+Capture the output first, then read `$?`:
+
+```
+OUT=$(scripts/paperclip-run-check.sh "$ISSUE_ID" 2>&1); RC=$?
+printf '%s\n' "$OUT"; echo "exit=$RC"
+```
+
+## `scripts/agent-launch.sh` is not the cause
+
+`scripts/agent-launch.sh` mints a GitHub App installation token and then
+`exec`s the real `claude` binary with the original arguments. It never reads,
+sets, or unsets any `PAPERCLIP_*` variable. `PAPERCLIP_TASK_ID`,
+`PAPERCLIP_RUN_ID`, and `PAPERCLIP_API_KEY` are injected into the adapter
+process by Paperclip itself, upstream of this wrapper.
+
+So a wake that names an issue in prose but carries no `PAPERCLIP_TASK_ID`, and
+a run whose token names a dead run, are both **vendor-side defects in the
+Paperclip runtime**. There is no launcher change that binds a run; the launcher
+is not in that path. Fixes for the run-binding and error-code asks belong
+upstream.
+
+## What to do when a write fails, either way
+
+In order:
+
+1. **Check your run binding first, before you burn calls.** Run
+
+   ```
+   ~/git-personal/appforge-control/scripts/paperclip-run-check.sh
+   ```
+
+   Use the absolute path: an agent's heartbeat cwd is the project workspace
+   (`.../projects/<company>/<project>/_default`), not this checkout, so a
+   relative `scripts/...` path will not resolve from where you are standing.
+
+   It decodes the token's `run_id` and `sub` claims, compares the run id to
+   `$PAPERCLIP_RUN_ID`, does one cheap authenticated write probe — a PATCH that
+   re-sends the issue's current priority, so it changes no field value, though it
+   does bump `updatedAt` — and then reads the issue activity log back to check
+   **how that write was recorded**. The read-back is why the probe now catches
+   family 2: a laundered write returns 2xx, so the HTTP status alone gives a run
+   that is about to misattribute every comment a clean bill of health.
+
+   | Exit | Meaning |
+   |---|---|
+   | `0` | probe returned 2xx **and** the write was recorded as this agent and this run — write normally |
+   | `1` | family 1: every write in this run will 403 — use the courier pattern |
+   | `2` | UNVERIFIED — the check could not be completed, or the probe landed but its attribution could not be read back. Not an all-clear. |
+   | `3` | family 2: the write SUCCEEDED but was recorded as the board — do not write |
+
+   Only exit `0` is evidence. The token always carries *some* `run_id` claim, so
+   the claim on its own cannot distinguish a live binding from a dead one; and a
+   2xx on its own cannot distinguish your write from the board's.
+
+   On `3`, do not write this heartbeat: report the run id in your final response
+   and deliver there. The attribution read-back needs `GET
+   /api/issues/{id}/activity`; if that read fails the script returns `2` rather
+   than `0`, because an unverified attribution is not a clean one.
+
+2. **Do not go silent.** A run that cannot comment still looks, from the
+   outside, like an agent that chose not to say anything. That is how two days
+   got spent on [APP-26](/APP/issues/APP-26).
+3. **Use the courier pattern.** Issue *creation* is company-scoped and stays
+   open when issue writes are refused:
+
+   ```
+   POST /api/companies/$PAPERCLIP_COMPANY_ID/issues
+   { "title": "...", "description": "<the whole deliverable, self-contained>",
+     "assigneeAgentId": "<who needs it>", "priority": "..." }
+   ```
+
+   Put the entire deliverable in the description — the recipient may not be
+   able to read anything you could not write. This is the difference between a
+   lost run and a delivered one.
+4. **Report the run id and the exact code** in your final response. The
+   adapter/runtime status channel is the sanctioned fallback when the control
+   plane will not take a write, and the run id is the only thing that makes the
+   failure diagnosable afterwards.
+
+And do not retry a failing control-plane write more than twice in a heartbeat.
+If run binding is the problem, retrying cannot succeed — the condition is fixed
+for the life of the run.

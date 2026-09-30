@@ -18,6 +18,15 @@
 # (§7.2: budget < 20% remaining ⇒ drop one tier) already covers cost control
 # within that fixed tier for routine, low-stakes runs.
 
+# Capability strings (`capabilities:` on each agent below) are DEFINED in
+# docs/capabilities.md, and nowhere else. Nothing in this repo reads or
+# validates them — they are read by humans and by agents deciding how to route
+# work, which is exactly why an undefined one is dangerous rather than untidy.
+# APP-194: `browser:e2e` was granted here and defined nowhere, was therefore
+# read as "QA can drive a browser", and APP-54 was routed to QA on that reading
+# for a Chrome Web Store dashboard export it could never have done. Grant and
+# definition change in the same PR, always.
+
 schema: appforge/agents@1
 
 # Run turn ceiling (APP-29). Previously this lived only in each agent's
@@ -105,7 +114,7 @@ agents:
     adapter: claude_local
     tier: HIGH
     budget_cents: 1500
-    max_turns_per_run: 40
+    max_turns_per_run: 60   # same grounds as Builder: until the Architect/Reviewer/Release hires split off, CTO carries `repo:write:platform` and does multi-file edits plus test loops itself. APP-157 died at turn 40 with the work committed and the suite unrun — the exact "dies mid-PR, leaves a dirty branch" failure Builder's 60 was set to prevent.
     heartbeat:
       timer: false
       routines: []
@@ -138,6 +147,16 @@ agents:
       routines: []
       wakes: [handoff_assignment, "webhook:pr_ready"]
       max_concurrent: 1   # holds a browser e2e session and a repo checkout - two concurrent runs would collide on the same workspace
+    # VERIFIED (APP-194, 2026-09-29): `browser:e2e` is real and was NOT removed.
+    # It was filed as a phantom grant on the strength of a search scoped to this
+    # repo, which is the wrong place to look — test tooling lives in the kit.
+    # `@appforge/e2e` (appforge-kit `packages/e2e`, commit c128399) is merged,
+    # Playwright 1.63.0 and its Chromium are installed, the package's own suite
+    # runs 10/10 green against a real browser, and `appforge test --e2e` returns
+    # ok:true end to end. What `browser:e2e` cannot do is touch an authenticated
+    # session: it launches an empty throwaway profile with no cookies and no
+    # relationship to the founder's Brave. That boundary, not the grant, is what
+    # mis-routed APP-54. See docs/capabilities.md.
     capabilities: [repo:read, repo:tests-pr, browser:e2e]
     reports_to: cto
 
@@ -160,23 +179,29 @@ agents:
     max_turns_per_run: 40
     heartbeat:
       timer: false
-      # RULING (APP-50): `daily-0630-if-anomalies` is REMOVED from this list, not
-      # deferred in place. §6.2 gates it on "the ingest job's deterministic
-      # anomaly check" — and that check does not exist. There is no ingest to
-      # read (config/analytics.yaml is `enabled: false`, endpoint null, pending
-      # appforge-edge/P1-10) and no evaluator to flag with (APP-43 owns
-      # `appforge metrics digest`, and is blocked). A routine whose only trigger
-      # condition can never be true either does not fire, or fires
-      # unconditionally and spends a model call to conclude nothing — the exact
-      # polling shape the APP-39 ruling above rejected on cost grounds, against
-      # the smallest budget in the company (400 cents).
+      # `daily-0630-if-anomalies` is RESTORED here (APP-43), in the same commit
+      # that created the routine, as the APP-50 ruling required. Routine
+      # 91419456-6fa8-4521-bafe-c99eab44f2f1, assigned to analyst.
       #
-      # This file must describe the control plane, not aspire to it: it claimed
-      # six routines where five existed. Restore this entry in the SAME commit
-      # that creates the routine, once APP-43 ships a digest that can set an
-      # anomaly flag. See agents/analyst/HEARTBEAT.md for the wake's contract,
-      # which is unchanged and still correct for that future state.
-      routines: [weekly-mon-0730]
+      # Read this before adding a cron trigger to it: the routine deliberately
+      # carries an `api` trigger and NO schedule trigger. §6.2 gates the wake on
+      # "the ingest job's deterministic anomaly check", and a Paperclip
+      # `schedule` trigger cannot express a condition — it fires every day
+      # regardless. That is the cost shape APP-50 rejected: a routine that
+      # "fires unconditionally and spends a model call to conclude nothing",
+      # against the smallest budget in the company (400 cents).
+      #
+      # So the 06:30 Asia/Kolkata schedule lives OUTSIDE the control plane, in
+      # LaunchAgent `ing.paperclip.appforge-digest-gate` →
+      # `infra/macos/digest-gate.sh`, which runs `metrics-digest.mjs --gate` and
+      # POSTs the api trigger only on exit 0 (≥1 anomaly flag). Exit 20 is a
+      # quiet day and fires nothing; exit 1 means the check itself failed and is
+      # NOT treated as quiet. The name below therefore describes a conditional
+      # wake, not a cron entry — the control plane holds no 06:30 schedule for
+      # analyst, and that is correct, not drift.
+      #
+      # agents/analyst/HEARTBEAT.md carries the wake's contract, unchanged.
+      routines: [weekly-mon-0730, daily-0630-if-anomalies]
       wakes: []
     capabilities: [metrics:read, "metrics:ingest:read-only"]
     reports_to: ceo
