@@ -27,7 +27,7 @@ tiers:
     timeout_s: 300
   NORMAL:
     provider: anthropic
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     fallback: { provider: openai, model: gpt-6-sol }
     max_tokens: 16000
     timeout_s: 1800
@@ -58,7 +58,7 @@ tiers:
 # above must have a price row here (P0-06 requirement).
 prices:
   claude-haiku-4-5:  { input_per_mtok_cents: 100,  output_per_mtok_cents: 500  }   # $1.00 / $5.00 per MTok
-  claude-sonnet-5:   { input_per_mtok_cents: 200,  output_per_mtok_cents: 1000 }   # $2.00 / $10.00 per MTok
+  claude-sonnet-5-5: { input_per_mtok_cents: 200,  output_per_mtok_cents: 1000 }   # $2.00 / $10.00 per MTok (platform.claude.com/docs/en/about-claude/pricing, checked 2026-10-01)
   claude-opus-5-5:   { input_per_mtok_cents: 400,  output_per_mtok_cents: 2000 }   # $4.00 / $20.00 per MTok
   claude-fable-5-1:  { input_per_mtok_cents: 1000, output_per_mtok_cents: 5000 }   # $10.00 / $50.00 per MTok — not routed to by default; see CRITICAL note above
   gpt-6-luna:        { input_per_mtok_cents: 10,   output_per_mtok_cents: 50   }   # $0.10 / $0.50 per MTok
