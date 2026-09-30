@@ -1,0 +1,13 @@
+{
+  "total_count": 1,
+  "check_runs": [
+    {
+      "id": 4811203349,
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-09-30T11:02:17Z",
+      "head_sha": "2b7d1f4c9e0a5638ab21cd77e4f09b1a6c3d8e52"
+    }
+  ]
+}
