@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- A PATH, not a credential. The Play service-account JSON key lives in a
+		     mode-0600 file the founder placed on this machine; this variable only
+		     says where. That is the whole reason this template is safe to commit
+		     and the reason no agent env, no Paperclip run and no comment ever
+		     needs the key's value (AGENTS.md 6.1 rule 4).
+
+		     Putting the JSON here instead would create a second copy of the
+		     credential with its own lifetime, readable by anything that can read
+		     the installed plist, and would survive key rotation silently. -->
+		<key>PLAY_READONLY_INGEST_KEY_FILE</key>
+		<string>__PLAY_READONLY_INGEST_KEY_FILE__</string>
+		<key>APPFORGE_REPO</key>
+		<string>/Users/rkamalapuram/git-personal/appforge-control</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/rkamalapuram</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control</string>
+	<key>ExitTimeOut</key>
+	<integer>300</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>ing.paperclip.appforge-play-ingest</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/infra/macos/play-ingest.sh</string>
+	</array>
+	<!-- RunAtLoad false, matching every other job here: loading the agent (a
+	     reboot, a reinstall) must not fire an off-schedule pull. A missed day
+	     costs nothing - the endpoint serves a seven-day rolling window, so a
+	     single skipped run loses no data at all. -->
+	<key>RunAtLoad</key>
+	<false/>
+	<!-- StartCalendarInterval is LOCAL time; this machine runs Asia/Kolkata.
+	     03:15 sits after the 02:00 backup so the two never contend for the
+	     repo, and well before Analyst's 06:30 digest wake, which reads the
+	     manifest this job writes. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>15</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/play-ingest.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/play-ingest.log</string>
+</dict>
+</plist>

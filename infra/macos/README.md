@@ -287,6 +287,46 @@ lines past 512KB; `healthy, nothing to do` is the normal line).
 Tests: `scripts/tests/paperclip-lock-guard.test.mjs` (drives the real script
 against a fake db dir, fake health endpoint and real postgres-named processes).
 
+## Play reviews ingest (`ing.paperclip.appforge-play-ingest`)
+
+Daily at **03:15 local**, `play-ingest.sh` runs
+`scripts/play-reviews-ingest.mjs`, which pulls Google Play user reviews for
+the two Android apps and appends to `data/metrics/manifest.jsonl`. APP-210;
+the metric semantics are in `docs/metrics-ingest.md` §4.7.
+
+**This is a script, not an agent run.** The board ruled on 2026-09-30 that
+ingest is plumbing, not judgement: no model call happens, and nothing between
+the credential and the manifest is an LLM.
+
+**The plist carries a PATH, not the key.** `PLAY_READONLY_INGEST_KEY_FILE`
+names a mode-0600 service-account JSON on this Mac. That is why the template
+is safe in git and why `AGENTS.md` §6.1 rule 4 ("no agent holds or requests a
+store credential") holds structurally here rather than by discipline — there
+is no value in any agent-reachable place to hold. Rendering the JSON into the
+plist would have made a second credential copy with its own lifetime, readable
+by anything that can read the installed plist, surviving rotation silently.
+
+Setup, once:
+
+```sh
+echo 'export PLAY_READONLY_INGEST_KEY_FILE="$HOME/.config/appforge/play-readonly-ingest.json"' \
+  >> ~/git-personal/.envrc
+infra/macos/play-ingest.sh --dry-run      # validates the key, opens no socket
+infra/macos/install-plists.sh play-ingest
+```
+
+The job refuses to run against a key that is group/world-readable, that sits
+inside this git working tree, or that belongs to a service account other than
+`play-readonly-ingest@…` — so `release-bot`, the only publisher, cannot be
+pointed at it by a config typo. Every error path is scrubbed: the token
+exchange surfaces only Google's `error`/`error_description`, a non-JSON error
+body is not quoted at all, and a malformed key file is never echoed. These
+logs (`logs/play-ingest.{log,err.log}`) are kept indefinitely.
+
+Tests: `scripts/tests/play-reviews.test.mjs` (39, including one that asserts
+no review text or author name survives into anything written to disk, and one
+that asserts the access token never reaches a log line).
+
 ## What's not here (and why)
 
 - No `cloud-init.yaml` for a VPS yet — that's the §4.3 "move-to-VPS

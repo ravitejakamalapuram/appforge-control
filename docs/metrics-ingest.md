@@ -419,23 +419,152 @@ The last row is the one to read twice. The whole asymmetry argument rests on
 Play publishing no weekly-distinct figure. If a real report contradicts that,
 the finding is more valuable than the convenience.
 
-### 4.7 Status
+### 4.7 The reviews API — a second Play surface, with three hard walls
 
-- **Importer: built and tested** (`scripts/lib/play-report.mjs`, 15 tests in
-  `scripts/tests/play-report.test.mjs` plus 4 end-to-end in
-  `metrics-import.test.mjs`). `--source play` lands a manifest entry with a
-  derived `lag_days`.
-- **Service account: not created. Secret: not bound.** Both need founder Play
-  Console access — §4.1 steps 1–4. This is the only thing left, and no agent
-  can do it.
-- **No real report has landed**, so every mapping is still `confirmed: false`
-  and nothing has been imported into `data/metrics/manifest.jsonl` from this
-  source. The synthetic fixtures were run against a scratch data root on
-  purpose; putting a synthetic reading in the real manifest would be the exact
-  error the `*-SYNTHETIC` naming exists to prevent.
+Provisioned 2026-09-30. Separate from §4.1's reports bucket: same service
+account, different endpoint, and a **completely different set of things it is
+able to see**. Treating the two as one source is the mistake this section
+exists to prevent.
+
+`androidpublisher.googleapis.com/.../applications/{package}/reviews` returns
+user reviews. Google states three limits, and all three are quoted verbatim in
+`scripts/lib/play-reviews.mjs` and travel into **every manifest entry** rather
+than living here:
+
+| Google's words | What it destroys |
+|---|---|
+| "You can retrieve only the reviews that users have created or modified within the last week." | **Any lifetime count.** A tally here is a seven-day *rolling* figure. Consecutive daily pulls overlap by six days, so they must never be summed — and a review edited twice in a week is one row, not two. |
+| "The API shows only the reviews that include comments. If a user rates your app but does not provide a comment, their feedback is not accessible from the API." | **The rating average.** A mean over reviews that carry text is a mean over a self-selected subsample of raters. It is not a fresher `play_rating_average`; it is a different population. |
+| "The Reply to Reviews API allows you to access feedback only for production versions of your app." | **The zero.** A non-production app answers HTTP 200 with an empty list — byte-identical to a published app's quiet week. |
+
+Source: <https://developers.google.com/android-publisher/reply-to-reviews>
+
+The third one is the trap worth stating plainly. **TelePort is
+`internal_track`.** Its reviews pull will always come back empty and always
+look exactly like InvTrack having a quiet week. Nothing in the response
+distinguishes them, so `summariseReviews` **refuses to run without
+`store_item_status`** from `config/portfolio.yaml` rather than defaulting —
+TelePort's metrics record as `missing` with the registered reason code
+`play_reviews_production_only`, never as `0` (§7). A published app with a
+genuinely empty week *does* get a real `0` for the count, and its star mean
+records as `missing`, because the mean of an empty set is not zero.
+
+Each constraint is therefore carried in the **metric names**, where it cannot
+be separated from the number:
+
+- `play_commented_reviews_7d`
+- `play_commented_review_star_mean_7d`
+- `play_commented_reviews_7d_star_1` … `_star_5`
+
+`assertReviewMetricsAreHonest` runs on the values on the way out and **fails
+the import** on any name that is unwindowed, lifetime-sounding, or not
+declared in `config/portfolio.yaml`. Adding `play_rating_count` here does not
+produce a wrong number; it produces a crash. Both reviews-API metrics are
+additionally alias-forbidden against their reports-bucket namesakes.
+
+Two smaller decisions, recorded so they are not re-litigated:
+
+- **Review text and author names are dropped at ingest.** They are user
+  personal data and no metric above needs them; the persisted artefact holds
+  star rating and last-modified timestamp only. The hash of the untruncated
+  response rides along as `upstream_response_sha256` so the drop is auditable.
+  There is a test that asserts no review body or author name survives into the
+  artefact.
+- If the endpoint returns a review **last modified before** the seven-day
+  window, or returns reviews at all for a **non-production** app, the entry
+  carries an explicit anomaly note. Either would mean a documented constraint
+  does not hold, and that is news for APP-42, not something to absorb quietly.
+
+### 4.8 The ingest job — a launchd script, not an agent run
+
+Board ruling, 2026-09-30: **ingest is plumbing, not judgement.** No new hire,
+approval or budget is involved, so the CTO owns it and it executes as a
+deterministic script. **No LLM is in the loop and no agent env holds the key.**
+
+It follows the backup-job pattern exactly:
+
+| Piece | Where |
+|---|---|
+| Job | `infra/macos/play-ingest.sh` → `scripts/play-reviews-ingest.mjs` |
+| LaunchAgent template | `infra/macos/ing.paperclip.appforge-play-ingest.plist` (03:15 local, daily) |
+| Install | `infra/macos/install-plists.sh play-ingest` |
+| Log | `logs/play-ingest.log`, `logs/play-ingest.err.log` |
+
+**The credential is addressed by PATH, never by value.** This is the part that
+matters and it is not a style preference:
+
+- `PLAY_READONLY_INGEST_KEY_FILE` holds the *path* to a mode-0600 JSON key the
+  founder placed on that Mac. A path is not a secret, which is why the plist
+  template is safe to commit, why `.envrc` is a safe place to set it, and why
+  §6.1 rule 4 holds here **structurally** — there is no value for an agent to
+  hold, request or echo.
+- Rendering the JSON *into* the plist would have created a second copy of the
+  credential, with its own lifetime, readable by anything that can read the
+  installed plist, and surviving key rotation silently. It was never on the
+  table.
+- The loader refuses a key that is group- or world-readable, that lives inside
+  this git working tree (one `git add -A` from publication — the repo has
+  committed a token once already), or that **belongs to a different service
+  account**. That last check is why `release-bot` cannot be pointed at this
+  job by accident: the publisher identity stays the only publisher, and a read
+  path does not acquire release authority through a config typo.
+- Every error path is scrubbed. The token-exchange failure surfaces only
+  Google's `error` and `error_description`; a non-JSON error body is not
+  quoted at all; a malformed key file is never echoed. These logs live forever
+  in `logs/`.
+
+**Founder step, once** — the only thing left, and it must not be done by
+pasting a key anywhere an agent can see:
+
+```sh
+# 1. The key file already exists on this Mac, mode 0600. Just say where:
+echo 'export PLAY_READONLY_INGEST_KEY_FILE="$HOME/.config/appforge/play-readonly-ingest.json"' \
+  >> ~/git-personal/.envrc
+
+# 2. Check without making a single network call or writing anything:
+infra/macos/play-ingest.sh --dry-run
+
+# 3. Install the LaunchAgent:
+infra/macos/install-plists.sh play-ingest
+```
+
+`--dry-run` validates the key's permissions, its ownership and the target list,
+prints which apps would be treated as real-zero versus missing, and opens no
+socket. `install-plists.sh` refuses to install a plist that still contains an
+unsubstituted placeholder, so a forgotten step fails loudly at install time
+rather than at 03:15.
+
+### 4.9 Status
+
+- **Service account: created and verified** (2026-09-30, founder).
+  `play-readonly-ingest@rk-release-platform.iam.gserviceaccount.com`, separate
+  from `release-bot`, which remains the only publisher. Permission granted per
+  app is **"View app information and download bulk reports (read-only)"** and
+  nothing else — no release, testing-track, orders or reply-to-reviews rights.
+  Developer id `7973294363672526163`; packages `com.invtracker.inv_tracker`
+  (InvTrack) and `com.carfry369.teleport` (TelePort). Token exchange and
+  `reviews.list` both verified HTTP 200 for both packages.
+- **Reviews ingest: built and tested** (`scripts/lib/play-reviews.mjs`,
+  `scripts/play-reviews-ingest.mjs`, 37 tests). Waiting only on the founder's
+  one-line `.envrc` export and `install-plists.sh play-ingest` (§4.8).
+- **Statistics-report importer: built and tested**
+  (`scripts/lib/play-report.mjs`, 15 tests in `scripts/tests/play-report.test.mjs`
+  plus 4 end-to-end in `metrics-import.test.mjs`). `--source play` lands a
+  manifest entry with a derived `lag_days`.
+- **The reports bucket is not wired up yet.** The bucket id is now known —
+  `pubsite_prod_rev_7973294363672526163` — but the service account still needs
+  `roles/storage.objectViewer` on it (§4.1 step 4), and installs, uninstalls
+  and the true rating figures come from there, not from the reviews endpoint.
+  Tracked separately; §4.7's metrics are not a substitute for any of them.
+- **No real report has landed**, so every §4.1 mapping is still
+  `confirmed: false` and nothing has been imported into
+  `data/metrics/manifest.jsonl` from that source. The synthetic fixtures were
+  run against a scratch data root on purpose; putting a synthetic reading in
+  the real manifest would be the exact error the `*-SYNTHETIC` naming exists
+  to prevent.
 - `teleport` is **internal-track only** (`store_item_status: internal_track`),
-  so its bulk reports may be empty or absent even after the grant. An absent
-  report must read `missing`, never `0` — §7.
+  so its bulk reports may be empty or absent and its reviews pull is
+  structurally empty. Both must read `missing`, never `0` — §7.
 
 ---
 

@@ -144,6 +144,7 @@ reason_codes:
   first_published_null:    "The day-30/60/90 clock has no origin for this product."
   not_published:           "store_item_status is not `published`; §22.1 is a post-launch policy."
   thresholds_not_set:      "A rule set applies to this platform but its threshold values have not been ruled on yet."
+  play_reviews_production_only: "Play's reviews endpoint returns feedback only for PRODUCTION versions of an app, and this product has no production version. The API answers HTTP 200 with an empty list, which is byte-identical to a published app's quiet week — so the reading is absent, not zero. APP-210."
 
 # ===========================================================================
 # 3. METRICS
@@ -393,6 +394,52 @@ metrics:
     measurability: MEASURABLE_NOW
 
   play_rating_average: { source: play_reports_bucket, origin: store, cadence: daily, max_age_days: 30, measurability: MEASURABLE_NOW }
+
+  # ---- Google Play reviews API (APP-210) ----
+  # Three Google-stated constraints bound everything below, and each one is in
+  # the metric NAMES so the caveat cannot be separated from the number:
+  #   "You can retrieve only the reviews that users have created or modified
+  #    within the last week."                              -> every name ends _7d
+  #   "The API shows only the reviews that include comments. If a user rates
+  #    your app but does not provide a comment, their feedback is not
+  #    accessible from the API."                           -> every name says commented_
+  #   "The Reply to Reviews API allows you to access feedback only for
+  #    production versions of your app."                   -> play_reviews_production_only
+  # Enforced in scripts/lib/play-reviews.mjs by assertReviewMetricsAreHonest,
+  # which fails the import rather than emitting an unwindowed name.
+  play_commented_reviews_7d:
+    source: play_reviews_api
+    field: commented_reviews_count
+    origin: store
+    cadence: daily          # the window rolls; the pull is daily
+    max_age_days: 3
+    measurability: MEASURABLE_NOW
+    definition_warning: |
+      A ROLLING SEVEN-DAY COUNT, not a running total and not a weekly series.
+      Consecutive pulls OVERLAP by six days, so these values must never be
+      summed, and a review edited twice in one week is one row, not two. It
+      is also blind to every rating left without a comment, which on Play is
+      most of them. It is not `play_rating_count` and cannot be made into it.
+
+  play_commented_review_star_mean_7d:
+    source: play_reviews_api
+    field: commented_review_star_mean
+    origin: store
+    cadence: daily
+    max_age_days: 3
+    measurability: MEASURABLE_NOW
+    definition_warning: |
+      The mean star rating OF REVIEWS THAT CARRY WRITTEN COMMENTS, over a
+      seven-day window. Users who write are a self-selected subsample of users
+      who rate, so this is a biased estimator of the store rating and is not
+      an approximation of `play_rating_average` — it is a different quantity
+      with a different population. See forbidden_aliases.
+
+  play_commented_reviews_7d_star_1: { source: play_reviews_api, field: star_histogram_1, origin: store, cadence: daily, max_age_days: 3, measurability: MEASURABLE_NOW }
+  play_commented_reviews_7d_star_2: { source: play_reviews_api, field: star_histogram_2, origin: store, cadence: daily, max_age_days: 3, measurability: MEASURABLE_NOW }
+  play_commented_reviews_7d_star_3: { source: play_reviews_api, field: star_histogram_3, origin: store, cadence: daily, max_age_days: 3, measurability: MEASURABLE_NOW }
+  play_commented_reviews_7d_star_4: { source: play_reviews_api, field: star_histogram_4, origin: store, cadence: daily, max_age_days: 3, measurability: MEASURABLE_NOW }
+  play_commented_reviews_7d_star_5: { source: play_reviews_api, field: star_histogram_5, origin: store, cadence: daily, max_age_days: 3, measurability: MEASURABLE_NOW }
   play_crash_rate:     { source: play_developer_reporting_api, origin: store, cadence: daily, max_age_days: 14, measurability: MEASURABLE_NOW }
   play_anr_rate:       { source: play_developer_reporting_api, origin: store, cadence: daily, max_age_days: 14, measurability: MEASURABLE_NOW }
 
@@ -639,6 +686,10 @@ forbidden_aliases:
     why: "The most likely proxy anyone would reach for, and the one DEC-0009 D3 forbids absolutely."
   - pair: [ga4_install_events, cws_installs]
     why: "A store-listing-funnel `install` EVENT count (GA4, sent only when the permission prompt is accepted) vs. the store's own install accounting (dashboard export). Two instruments on one quantity; they will not agree, and the gap is information. APP-157 §3.5."
+  - pair: [play_commented_review_star_mean_7d, play_rating_average]
+    why: "The mean over reviews that carry WRITTEN COMMENTS in a seven-day window vs. the store's own lifetime rating average. Google: 'If a user rates your app but does not provide a comment, their feedback is not accessible from the API.' The API mean is computed over a self-selected minority of raters; it is not a fresher version of the store figure, it is a different population. APP-210."
+  - pair: [play_commented_reviews_7d, play_rating_count]
+    why: "A rolling seven-day count of COMMENTED reviews vs. the lifetime number of ratings. Consecutive pulls of the first overlap by six days and it never sees a ratings-only entry, so no accumulation of it converges on the second. APP-210."
   - pair: [ga4_listing_page_views, cws_listing_page_views]
     why: "GA4's `page_view` on the listing vs. the dashboard's own listing-page-views figure. Same conflation risk as the installs pair — and the one that would silently corrupt `store_listing_conversion`, EXP-0001's primary metric, by mixing a GA4 numerator with a dashboard denominator. APP-157 §3.5."
 
@@ -1396,8 +1447,8 @@ products:
   telugupanchangam: { platform: chrome,  store_item_status: unpublished,    first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "awaiting free CWS slot (§13.6)" }
   gitaverses:       { platform: chrome,  store_item_status: unpublished,    first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "awaiting free CWS slot (§13.6)" }
   cors-enabler:     { platform: chrome,  store_item_status: draft,          first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "CWS item still draft" }
-  teleport:         { platform: android, store_item_status: internal_track, first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "Play internal track only; CWS target is an unpublished draft" }
-  invtrack:         { platform: android, store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown; would also hit play_wau_unavailable on every WAU-written rule — see platform_rule_sets.android" }
+  teleport:         { platform: android, play_package: com.carfry369.teleport, store_item_status: internal_track, first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "Play internal track only; CWS target is an unpublished draft" }
+  invtrack:         { platform: android, play_package: com.invtracker.inv_tracker, store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown; would also hit play_wau_unavailable on every WAU-written rule — see platform_rule_sets.android" }
 
 portfolio_note: |
   Four of nine products are published with an unknown launch date and four
