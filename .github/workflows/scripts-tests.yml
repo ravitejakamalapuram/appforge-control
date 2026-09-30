@@ -1,0 +1,89 @@
+# The PR check this repo did not have (APP-217 / APP-225).
+#
+# Why it exists: #29 (APP-161) added install-runtime-launcher.sh and its tests,
+# green against the main of its day. #31 (APP-164) added three hard dependencies
+# to the same installer, green against the main of its day. Neither PR was red.
+# Their MERGE was red -- 9 of 14 tests in one suite -- and main stayed red
+# because nothing in this repo ever ran `node --test`. A merge-order interaction
+# is precisely the class of failure a branch check catches and a green PR cannot.
+#
+# Deliberately minimal, because the thing that makes a check useful is that
+# people trust it:
+#   - one job, one command, the same command a human runs in scripts/
+#   - ~40s, so it is never the reason a PR waits
+#   - read-only token: this job builds nothing, publishes nothing, and needs no
+#     write scope. It must never grow one -- see AGENTS.md on release dispatch.
+#   - no scheduled run, so it cannot become a source of background noise
+#
+# Making this a REQUIRED check is a repo-settings change, not a file in this
+# tree. Until branch protection on `main` requires it, this workflow reports but
+# does not block.
+#
+# ---------------------------------------------------------------------------
+# VERIFIED 2026-09-30 (APP-225), against origin/main d2c97fc, before first run.
+# Every platform assumption below was measured, not reasoned:
+#   - Node 24.12.0 (the pinned major), `npm ci` then bare `node --test` in
+#     scripts/: 304 tests, 304 pass, exit 0, 41s. Also green on 25.2.1 (38s).
+#   - depth-1 shallow clone (what actions/checkout@v4 gives by default): green,
+#     304/304, 42s. No test reads this repo's own git history.
+#   - no git identity at all (GIT_CONFIG_GLOBAL/SYSTEM=/dev/null, GIT_*
+#     author/committer env unset): still green, 304/304. See the identity step.
+#   - `shasum` (install-runtime-launcher.sh:145 uses `shasum -a 256`, not
+#     sha256sum) is provided by perl, present on both current and next
+#     ubuntu-latest: Ubuntu 24.04 ships Perl 5.38.2, Ubuntu 26.04 ships 5.40.1.
+#     ubuntu-latest flips to 26.04 in November 2026 (actions/runner-images
+#     #14748); this job survives that flip.
+#   - the suite is hermetic. The only github.com strings in tests/ are
+#     URL-builder assertions in github-app.test.mjs; nothing makes a request.
+# ---------------------------------------------------------------------------
+name: scripts tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scripts-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: scripts/package-lock.json
+
+      # DEFENSIVE, not load-bearing -- measured, see the VERIFIED block above.
+      # Two fixtures shell out to `git commit` (install-runtime-launcher.test.mjs
+      # and prune-agent-worktrees.test.mjs) and BOTH already set a repo-local
+      # user.email/user.name on their temp repo, so the suite is green on a
+      # runner with no identity configured at all. This step is here so the next
+      # fixture that commits does not have to rediscover that a runner has no
+      # committer identity. Keep it; just don't believe the suite depends on it.
+      - name: Give git a committer identity for test fixtures
+        run: |
+          git config --global user.email "ci@appforge.invalid"
+          git config --global user.name "appforge ci"
+
+      - name: Install dependencies from the lockfile
+        working-directory: scripts
+        run: npm ci
+
+      # Bare `node --test` is correct here: Node excludes node_modules from the
+      # default glob, and this is exactly what `npm test` runs. Do NOT "fix"
+      # this to `node --test tests/` -- the directory form makes Node resolve
+      # `tests` as a module and it dies in ~0s with `Cannot find module`.
+      - name: node --test
+        working-directory: scripts
+        run: node --test
