@@ -21,7 +21,7 @@ APP-42), partially corrected by QA the same day (APP-163).
 |---|---|
 | Chrome Web Store API v1.1 | **Closed.** One resource (`items`), methods `get`/`insert`/`update`/`publish`. Schemas carry `uploadState`, `crxVersion`, `itemError`, `status` — zero statistics fields. It is a publishing API. No v2 with a stats surface exists. |
 | Chrome Management API `customers.reports.countInstalledApps` | **Closed, and a different question.** `customer` means the caller's own Workspace org; it reports apps on a managed fleet. A developer cannot see store-wide installs of their own item. |
-| GA4 opt-in (Store listing tab) | **Partially open.** Emits `page_view` and a custom `install` event into a store-managed GA4 property, readable through the service-account-capable Data API. Tracked as **APP-157**. |
+| GA4 opt-in (Store listing tab) | **Open — but not to a service account.** Emits `page_view` and a custom `install` event into a GA4 property the store creates, on which the developer holds **Marketer**, a role that "can't be changed" and cannot manage users. No service account can therefore be granted read access. The Data API *is* reachable, with **OAuth user credentials**. Answered in §3. **APP-157.** |
 | Public listing page | **Open for two fields.** Rating average and rating count are on the anonymous public listing — no credential, no session, no automation. **APP-163.** |
 
 ### What A8 got right, and what it cost
@@ -40,13 +40,10 @@ somebody checked rather than inheriting the claim:
   path** for installs and listing page views — the two inputs to
   `store_listing_conversion`, EXP-0001's primary metric.
 
-Two constraints on the GA4 path that must not be lost (APP-157):
-
-1. **GA4 retention is 2 months** with de-identification on. That can never
-   satisfy `min_history_weeks: 12` on `wau_growth_monthly` / `wau_flat_60d`.
-   GA4 is a *current-period* source; our ingest must accumulate its own history.
-2. **GA4 `install` is a different instrument** from the dashboard's "Installs."
-   Two columns, never one.
+And the correction had a correction. The GA4 row above was first written as
+"readable through the service-account-capable Data API." The Data API is
+service-account-capable; **this property is not service-account-grantable**, and
+those are different claims. §3 records how that collapsed and what replaced it.
 
 ---
 
@@ -77,12 +74,192 @@ That closes APP-54 deliverable 1 — and only that does.
 
 ---
 
-## 3. Google Play — read-only service account
+## 3. Chrome Web Store GA4 — installs and listing page views
+
+APP-157. The question was deliberately narrow: **is the CWS-managed GA4
+property reachable by an external read-only service account?** Answered from
+primary sources 2026-09-30.
+
+**No — and the reason is structural, not a configuration gap we can close. A
+different credential shape does work, and it is still fully delegable.**
+
+### 3.1 Why the service account is closed
+
+Two sentences of Google's own documentation compose into the answer. Neither is
+ambiguous and neither is about us.
+
+Chrome Web Store, on the property it creates on the developer's behalf:
+
+> "You will be granted access to the property with the Marketer role. This
+> can't be changed."
+
+Google Analytics, on who may add a user to a property:
+
+> **Administrator** — "Full control of Analytics. Can manage users (add/delete
+> users, assign any role or data restriction)."
+>
+> **Marketer** — "Can create, edit, and delete audiences, events, and key
+> events." Includes the Analyst role's permissions (which include Viewer's).
+
+User management is an **Administrator** capability. The developer is
+permanently **Marketer**. So there is **nobody on our side of that property who
+can grant a service account anything**. The grant is not restricted, it is
+unavailable. No amount of Cloud-project or IAM work changes it, because the
+missing permission sits on the Analytics property, not on the service account.
+
+This is the one unknown APP-157 was opened to settle, and it resolves against
+the optimistic reading. Recorded here rather than left as folklore — which is
+the whole complaint against A8.
+
+### 3.2 The two sharing routes CWS does offer, and why both are refused
+
+> "Additional users can only be added by invitation to your publisher."
+
+That routes GA4 access through **Chrome Web Store publisher membership**. A
+publisher member can act on store listings. Buying a metrics *read* path by
+handing an identity *publish* authority is exactly the trade §6.1 rule 4 exists
+to refuse, and exactly the kind of permission grant the CTO role is forbidden to
+make. Refused on the security posture — before reaching the separate question of
+whether a service account could accept a developer invitation and its terms at
+all (it cannot; there is no one to click).
+
+> "Alternatively, you can use Data Studio to create a report based on your
+> Google Analytics data. This can be shared with any Google Account."
+
+Looker Studio sharing is a **viewing** grant. The Looker Studio API manages
+assets, not report data — there is no supported way to read a report's numbers
+back out programmatically. It produces a human-readable page, which is the thing
+this issue exists to get away from. Refused, and recorded so it is not
+re-proposed as a clever workaround.
+
+### 3.3 What does work: the Data API with OAuth user credentials
+
+The Data API never required a service account. Google's quickstart states you
+can authenticate "with a user account or service account", against scope:
+
+```
+https://www.googleapis.com/auth/analytics.readonly
+```
+
+The authenticated principal needs read access on the property. Marketer
+includes Analyst, which includes Viewer — the role renamed from "Read &
+Analyze". **The founder's own Google account already satisfies the Data API's
+requirement the moment the opt-in completes.** Nothing further has to be granted
+inside Analytics.
+
+So the read path is: a one-time OAuth consent by the founder, exchanged for a
+refresh token, held as a Paperclip secret, used by the ingest job to call
+`runReport` for `eventCount` broken out by `eventName`.
+
+### 3.4 The detail that decides whether the founder actually exits the loop
+
+A refresh token is only a delegation if it outlives the consent. One Google rule
+governs this and it is easy to trip:
+
+> "A Google Cloud Platform project with an OAuth consent screen configured for
+> an external user type and a publishing status of 'Testing' is issued a refresh
+> token expiring in 7 days"
+
+A Testing-status OAuth client would put the founder back in the loop **every
+week** — strictly worse than the dashboard export it was meant to replace. So
+the OAuth client's consent screen must be **"In production"** (or **Internal**,
+if the founder's account is on Workspace; the 7-day rule is scoped to *external*
++ Testing).
+
+`analytics.readonly` is a sensitive scope, so an unverified production app shows
+the "unverified app" warning once and is capped at **100 new users over the
+project's lifetime**. We need **one**. The cap and the warning are therefore
+immaterial here, and full Google verification is not on the critical path.
+
+None of the other documented revocation triggers bite either:
+
+- *unused for six months* — a daily ingest keeps it warm.
+- *password change* — applies only to refresh tokens carrying **Gmail** scopes.
+  Ours carries `analytics.readonly` and nothing else.
+- *user revocation* — a deliberate act, and the correct kill switch to keep.
+
+With the consent screen in production, one founder consent yields an
+**indefinitely durable** token. A8's *conclusion* for installs survives: this is
+delegable and the founder leaves permanently. A8's implied *mechanism* does not.
+
+### 3.5 Three constraints that must survive into the design
+
+1. **Retention is two months, and we cannot raise it.** CWS states "Data
+   retention is set to two months." Changing retention is a property-settings
+   action; Marketer is not a settings-administration role and the role "can't be
+   changed". This is harder than a default we could bump: GA4 is permanently a
+   **current-period** source. It can never satisfy `min_history_weeks: 12` on
+   `wau_growth_monthly` / `wau_flat_60d`. Any history is history **our** ingest
+   accumulated in durable rows. Do not design as though GA4 backfills.
+2. **GA4 `install` is a different instrument from the dashboard's "Installs".**
+   One counts store-listing-funnel install events; the other is the store's own
+   install accounting. They will not agree. Same for `page_view` versus the
+   dashboard's listing-page-views figure. **Two pairs, four columns, never two**
+   — `cws_installs`/`ga4_install_events` and
+   `cws_listing_page_views`/`ga4_listing_page_views`, all four banned from
+   substitution in `forbidden_aliases` and enforced by `assertNotAliased`.
+   `store_listing_conversion` stays defined on the **dashboard** family; mixing
+   a GA4 numerator with a dashboard denominator is the precise error the alias
+   ban exists to stop.
+3. **A withheld row is not a zero.** De-identification is on and CWS warns data
+   "may be withheld if it doesn't meet system-defined thresholds". At
+   single-digit install volumes that will happen. The importer must distinguish
+   "GA4 returned no rows" (→ `missing`) from "GA4 returned 0" (→ a real zero).
+   Writing 0 for a thresholded day would be a fabricated reading, and the
+   freshness contract's "never imported is `missing`, not `0`" rule only
+   protects us if the importer does not invent the row.
+
+### 3.6 Credential handling
+
+- The opt-in needs Developer Dashboard access. **No agent has it and none
+  should.** Analyst's TOOLS deny list stands (APP-157 names this).
+- The OAuth client secret and the resulting refresh token are held as
+  **Paperclip secrets**, bound `access.*` to the **ingest job only** — bound to
+  **no agent**. Not Analyst, not CTO, not QA. §6.1 rule 4 is absolute.
+- No agent reads, echoes, copies or stores either value.
+- Rotation: revoke in the founder's Google account, re-consent, replace the
+  secret. The CWS opt-in is untouched by rotation.
+
+### 3.7 Status — what is done and what is not
+
+The read path is **documented and decided**. It is **not provisioned**:
+
+- the Store-listing **"Opt in to Google Analytics"** has not been clicked, so
+  the GA4 property does not exist yet and has no numeric property id;
+- no OAuth client exists, no consent has been given, no secret is bound.
+
+Both need founder Developer Dashboard / Google account access.
+`scripts/metrics-import.mjs` therefore refuses `--source ga4` by name, with the
+reason, rather than writing a half-formed manifest entry. `ga4_install_events`
+and `ga4_listing_page_views` are declared in `config/portfolio.yaml` with
+`available_today: false` so the ban is in force before the first row arrives.
+
+Marking `install` as a key event is a Marketer capability and is presumably why
+CWS grants that role — but it is **not required** for this read path. Querying
+`eventCount` by `eventName` needs no conversion configuration, so the founder's
+only dashboard action is the opt-in itself.
+
+### 3.8 Confidence, stated honestly
+
+- **Service account closed: HIGH.** Two verbatim documentation statements that
+  compose deterministically. No live test could make Marketer able to manage
+  users.
+- **OAuth user-credential path succeeds end to end: MEDIUM-HIGH.** Each link is
+  documented, but no property exists yet, so `runReport` has never been run
+  against a CWS-managed one. A store-managed property could in principle carry a
+  restriction not in the docs.
+- **First live attempt settles the remainder**, and it is one call. Whoever runs
+  it records the answer here either way — including a failure. That is the
+  lesson A8 cost us.
+
+---
+
+## 4. Google Play — read-only service account
 
 Play is **fully delegable**: the founder does this once and then permanently
 exits the loop. Two Google surfaces are involved.
 
-### 3.1 The reports bucket (installs, uninstalls, 30-day active devices)
+### 4.1 The reports bucket (installs, uninstalls, 30-day active devices)
 
 Play publishes CSV statistics reports into a Cloud Storage bucket named
 `pubsite_prod_rev_<developer_id>`, readable by a service account.
@@ -115,12 +292,12 @@ Play publishes CSV statistics reports into a Cloud Storage bucket named
 
 Covers `invtrack` and `teleport`.
 
-### 3.2 Play Developer Reporting API (crash rate, ANR rate)
+### 4.2 Play Developer Reporting API (crash rate, ANR rate)
 
 Same service account, plus the `playdeveloperreporting.googleapis.com` API
 enabled on the project. Feeds `play_crash_rate` and `play_anr_rate`.
 
-### 3.3 The asymmetry that must not be smoothed over
+### 4.3 The asymmetry that must not be smoothed over
 
 **Play has no weekly-distinct active figure at all.** Daily active devices
 cannot be summed into a weekly distinct count, and
@@ -134,7 +311,7 @@ Analyst's read of Play's report schema is second-hand — Analyst has no store
 access, by design. **Confirm against the first real export and report back if
 the schema differs.**
 
-### 3.4 Status
+### 4.4 Status
 
 The path is documented. **The service account has not been created and no
 secret has been bound** — both need founder Play Console access.
@@ -143,14 +320,14 @@ error rather than writing a half-formed manifest entry.
 
 ---
 
-## 4. Gumroad
+## 5. Gumroad
 
 Already solved; no change. `GUMROAD_ACCESS_TOKEN` stays a Worker secret.
 `echokit` revenue reaches the P&L through the ingest job.
 
 ---
 
-## 5. Lag is measured, never assumed
+## 6. Lag is measured, never assumed
 
 Every import records:
 
@@ -169,7 +346,7 @@ Calendar days, not elapsed hours: data through the 27th pulled at 00:05 on the
 
 ---
 
-## 6. Staleness is loud
+## 7. Staleness is loud
 
 > "A skipped export must surface as a red flag, never as last week's number
 > presented as current. If it silently serves stale data, the whole §22.1
@@ -260,7 +437,7 @@ served.
 
 ---
 
-## 7. Two definitions not to get wrong
+## 8. Two definitions not to get wrong
 
 **CWS "weekly users" is not §18b's WAU.** §18b defines WAU as distinct
 `install_id` with ≥1 telemetry event in 7 days — a measure of **use**. Google's
@@ -291,7 +468,7 @@ rising one.
 
 ---
 
-## 8. Files
+## 9. Files
 
 | Path | Role |
 |---|---|

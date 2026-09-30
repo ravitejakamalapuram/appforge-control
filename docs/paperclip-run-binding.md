@@ -122,6 +122,84 @@ Full model: `docs/containment-model.md`. **Do not probe the unauthenticated
 write path** — the mechanism is established, and a write probe would itself
 create the unattributed write `DEC-0016` records as an accepted cost.
 
+## Task binding is a second, separate binding — and an unbound run can still take a lock
+
+Added 2026-09-30 for [APP-224](/APP/issues/APP-224), measured on the same instance.
+
+Everything above is about **run binding**: whether the server can resolve the
+token's `run_id` to a live heartbeat. There is a second, independent binding —
+whether the run is bound to an **issue** — and it decides different things:
+
+| | run binding | task binding |
+|---|---|---|
+| Carried by | `run_id` claim in `PAPERCLIP_API_KEY` | `PAPERCLIP_TASK_ID`; on the API, `run.contextSnapshot.taskId` / `.issueId` |
+| Failure code | `403 cross_issue_influence_run_context_required` | the same 403, on writes to the issue the run locked |
+| Scope of failure | every write in the run | the write, while `POST /checkout` still returns **200** |
+
+The consequence is the APP-224 defect: **a task-unbound run can take an issue's
+checkout lock it can never write to.** `POST /api/issues/{id}/checkout` returns
+200 and sets `in_progress`; every subsequent `PATCH` and comment on that issue
+403s. Meanwhile the assigned agent's own task-bound run gets `409
+issue_write_assignee_run_lock` on both `PATCH /api/issues/{id}` and
+`POST /checkout` — so for the life of the unbound run, the one status write the
+issue needs can be issued by nobody.
+
+### The discriminator is `contextSnapshot.taskId`, not `invocationSource`
+
+`GET /api/heartbeat-runs/{runId}` exposes both. Only one of them is the answer:
+
+- `contextSnapshot.taskId` / `.issueId` — **this is the binding.** Set on a
+  task-bound run, absent entirely on an unbound one.
+- `invocationSource` — only ever `assignment` or `automation` here (200 runs
+  sampled), and it does **not** track task binding. 53 agent comments in this
+  company were written successfully by `automation` runs, because those runs were
+  task-bound. Classifying on `invocationSource` would be wrong.
+
+### What was actually measured on APP-217 — and what the first reading got wrong
+
+| run | invocationSource | `contextSnapshot.taskId` | held APP-217's lock | outcome |
+|---|---|---|---|---|
+| `a520f601` | automation | absent (**unbound**) | — | failed; wake was a watchdog quota-resume |
+| `47c79a69` | automation | absent (**unbound**) | 00:03:42 → 00:17:26 | could not write; wrote its verdict to an issue *document* instead |
+| `e3b51905` | automation | `b126c0ef…` = **APP-217** | 00:17:27 → 00:23:55 | **closed APP-217** at 00:22:58 |
+
+Two corrections to how this first looked from inside the 409:
+
+1. **It is a bounded starvation window, not a permanent livelock.** The lock was
+   not passed hand-to-hand between unbound runs. Only the *first* holder was
+   unbound; the second was APP-217's own task-bound run, which closed the issue
+   five minutes later, with `assigneeAgentId` intact. The window equals the
+   unbound run's lifetime — here 13m44s.
+2. **A 409 seen from a bound run on a *different* issue is not proof of the
+   defect.** `issue_write_assignee_run_lock` is the documented, correct answer
+   when another run legitimately holds the checkout. Confirm the holder's binding
+   before calling it starvation.
+
+The generative mechanism worth reporting upstream is narrower than "unbound runs
+exist": `47c79a69` was a `max_turns_continuation` retry of `a520f601`, and the
+retry was dispatched with **no task binding at all**. A retry that drops the
+binding and then takes checkouts is the thing to fix.
+
+### What to do about it
+
+- **Do not force-release it and do not cancel the holding run.** The lock clears
+  by itself when the unbound run ends. Cancellation is what drives the recovery
+  sweep that manufactured the collateral on APP-208/APP-222, and
+  `POST /api/issues/{id}/release` additionally clears `assigneeAgentId`, which
+  turns a self-clearing item into a `board_only` orphan no agent credential can
+  close (APP-83/85/107/110/111/112/116 were made this way).
+- **Wait, or courier.** If the write cannot wait, create a self-assigned issue
+  carrying the whole deliverable — an assigned issue is what generates a
+  task-bound run. That is the courier pattern below, and it is what APP-222 did.
+- **Detection is wired.** `scripts/detect-stuck-execution-locks.mjs` classifies a
+  lock held by a live-but-unbound run as `live_unbound_holder` once it is older
+  than `--unbound-grace-minutes` (default 15m). It remains detection-only, per
+  the CEO ruling on APP-91.
+- **Upstream ask**, in preference order: (1) refuse `POST /checkout` on a
+  task-unbound run — the lock buys that run nothing; (2) preserve task binding
+  across continuation and watchdog-resume retries so the retry is bound like its
+  predecessor.
+
 ## Is it intermittent?
 
 No. It is **deterministic per run**, decided before the run does any work.

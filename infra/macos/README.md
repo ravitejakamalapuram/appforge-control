@@ -186,6 +186,54 @@ actually runs is documented here instead.
   line per action). `logs/quota-retry-watchdog.{out,err}.log` catch launchd-
   level stdout/stderr (crashes, not routine activity).
 
+- **Digest gate / Analyst 06:30 conditional wake (APP-43 / APP-50)** —
+  `digest-gate.sh` + `ing.paperclip.appforge-digest-gate.plist` (LaunchAgent
+  `ing.paperclip.appforge-digest-gate`).
+
+  Why the schedule lives here and not in the control plane: §6.2 gates
+  Analyst's 06:30 wake on "the ingest job's deterministic anomaly check". A
+  Paperclip `schedule` trigger cannot express a condition — it fires every
+  day regardless, which is exactly the cost shape APP-50 rejected (a routine
+  that "fires unconditionally and spends a model call to conclude nothing",
+  against the smallest budget in the company, 400 cents). So routine
+  `91419456-6fa8-4521-bafe-c99eab44f2f1` deliberately carries an **`api`
+  trigger and no schedule trigger**, and launchd holds the clock. The
+  control plane having no 06:30 entry for analyst is correct, not drift —
+  `config/agents.yaml` says the same thing next to the routine name.
+
+  What it does: fetches and checks out `origin/main` into a throwaway
+  detached worktree and runs `scripts/metrics-digest.mjs --gate` **from
+  there**, not from the live working tree — same named-ref discipline as the
+  launcher and watchdog deploys (APP-161 / APP-164), so a dirty checkout or
+  a half-finished branch can never decide whether Analyst wakes. The gate
+  recomputes the digest's §6.2 anomaly flags and exits **0 when at least one
+  flag is raised**, **20 on a quiet day**, and **1 when the check itself
+  failed**.
+  The script POSTs the routine's api trigger on exit 0 only. Exit 20 fires
+  nothing and is the expected common case; exit 1 is *not* treated as quiet
+  — a broken check must not read as "nothing crossed a threshold", so it
+  notifies instead of silently skipping the wake.
+
+  `StartCalendarInterval` is 06:30 **local** time. This machine runs
+  Asia/Kolkata, which is the timezone §6.2 names, so 6:30 here is 06:30 IST;
+  launchd has no per-job timezone, so a machine timezone change needs this
+  changed with it. `RunAtLoad` is `false` on purpose — loading the agent
+  (reboot, repair run) must not fire Analyst's wake off-schedule. A missed
+  day is cheaper than an unscheduled model call.
+
+  No `PAPERCLIP_API_KEY` in the plist: the control plane serves these GETs
+  unauthenticated on `127.0.0.1`, and minting a long-lived key would put a
+  standing credential on disk for a job that only needs loopback reads and
+  one trigger POST.
+
+  Install: `cp infra/macos/ing.paperclip.appforge-digest-gate.plist
+  ~/Library/LaunchAgents/` then `launchctl bootstrap gui/$(id -u)
+  ~/Library/LaunchAgents/ing.paperclip.appforge-digest-gate.plist` — same
+  copy-and-bootstrap pattern as the backup and sync jobs. Verify a firing
+  decision without firing it with `infra/macos/digest-gate.sh --dry-run`.
+
+  Log: `logs/digest-gate.log` / `logs/digest-gate.err.log`.
+
 ## Paperclip stale-lock guard (`ing.paperclip.appforge-lock-guard`)
 
 **Why.** After an unclean shutdown (kernel panic 2026-09-28; forced reboot
