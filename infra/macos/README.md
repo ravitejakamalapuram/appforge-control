@@ -250,3 +250,51 @@ Don't, unless you're fixing a bug in `apply-service-env.sh` itself. Run
 plist's *structure* ever needs to differ from what Paperclip generates, that
 is itself a decision worth a Decision record — see the master plan §4.3 and
 §26.
+
+## Secrets never live in the plists in git (2026-09-30 incident)
+
+**What happened.** Commit `52d4052` (P0-03) baked the real `CLOUDFLARE_R2_API_TOKEN`, the
+healthchecks.io ping URLs and the ntfy topic straight into
+`ing.paperclip.appforge-backup.plist`, `-sync.plist` and later `-digest-gate.plist`, because
+launchd does not source `.envrc` and the values had to be *somewhere*. Those files were committed
+and pushed to `main`. The repo is private with no forks, but a private repo is not a secret store:
+every clone, PR diff, CI log and agent checkout carries the value.
+
+**The rule now.** The committed `*.plist` files are **templates**. A secret is a named placeholder
+(`__CLOUDFLARE_R2_API_TOKEN__`, `__HEALTHCHECKS_PING_URL_BACKUP__`,
+`__HEALTHCHECKS_PING_URL_PAPERCLIP__`, `__NTFY_TOPIC__`). The real value is filled in **at install
+time** from the environment or `~/git-personal/.envrc` and written only to
+`~/Library/LaunchAgents/`, mode `0600`.
+
+```
+infra/macos/install-plists.sh --dry-run            # resolve + validate everything, write nothing
+infra/macos/install-plists.sh                      # render, install (0600), bootout + bootstrap, all templates
+infra/macos/install-plists.sh backup sync          # just those jobs (label suffix or full label)
+infra/macos/install-plists.sh --no-load backup     # write the plist but leave launchd alone
+```
+
+Properties worth knowing: values are never printed (errors name the *variable*); all jobs are
+rendered and `plutil -lint`ed before any file is written, so a missing variable for one job cannot
+leave the others half-installed; `.envrc` is parsed, not executed (only `export NAME="literal"`
+lines - a value that needs `$(...)` must be exported in the environment instead); the installer
+refuses to write a plist that still contains a placeholder. `--dest` and `--envrc` exist for tests.
+
+**The guard.** `scripts/tests/no-secrets-in-repo.test.mjs` scans every tracked (and untracked,
+non-ignored) file for Cloudflare tokens, healthchecks ping URLs, GitHub tokens, age secret keys,
+PEM private keys with key material, and literal `NTFY_TOPIC` values. It prints only
+`file:line  rule`, never the matched text. Run it directly with `node scripts/secret-scan.mjs`.
+A line carrying `secret-scan:allow` is skipped; prefer building fake fixtures at runtime instead.
+
+**Rotate after any exposure - do not rely on deleting the file.** Git history still contains the
+old values; rewriting shared history under live agents is riskier than the leak it would hide, so
+**rotation, not history surgery, is the remediation**:
+
+| Value | Risk if leaked | Action |
+|---|---|---|
+| `CLOUDFLARE_R2_API_TOKEN` | **High** - read/write/delete on every R2 bucket in the account, including `appforge-backups` | Create a new token, update `.envrc`, run the installer, revoke the old token |
+| healthchecks.io ping URLs | Low - lets a stranger send fake "alive" pings for the dead-man's-switch | Optional: regenerate the check's ping URL |
+| ntfy topic | Low - lets a stranger push notifications to the founder | Optional: pick a new topic and re-subscribe |
+
+**Not covered here:** `backup.sh`, `sync.sh` and `digest-gate.sh` are still run from the shared
+checkout by their plists (the same "runs whatever branch is checked out" hazard the watchdog and
+launcher were moved off in APP-137/APP-164). Deploying them under `~/.appforge/bin` is a separate change.

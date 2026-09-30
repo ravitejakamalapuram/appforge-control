@@ -5,9 +5,9 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HEALTHCHECKS_PING_URL_PAPERCLIP</key>
-		<string>https://hc-ping.com/9d507351-69b5-4679-be4e-7f6e74ed43b4</string>
+		<string>__HEALTHCHECKS_PING_URL_PAPERCLIP__</string>
 		<key>NTFY_TOPIC</key>
-		<string>appforge-founder-SGVuqZoj2f3PbnOI</string>
+		<string>__NTFY_TOPIC__</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 		<key>HOME</key>
