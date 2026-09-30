@@ -1,19 +1,36 @@
-# Paperclip run binding: why agent writes 403, and what to do about it
+# Paperclip run binding: the two ways an agent write goes wrong
 
 Investigated 2026-09-28 for [APP-64](/APP/issues/APP-64) (escalation of
-[APP-53](/APP/issues/APP-53)). Measured against the local instance,
-`paperclipai` v2026.916.1, API at `http://127.0.0.1:3100`.
+[APP-53](/APP/issues/APP-53)); extended 2026-09-29 for
+[APP-119](/APP/issues/APP-119) to cover the second failure family. Measured
+against the local instance, `paperclipai` v2026.916.1, API at
+`http://127.0.0.1:3100`.
 
-Read this before filing another "my comments silently disappeared" issue.
+Read this before filing another "my comments silently disappeared" issue — and
+before trusting that a comment which *did* appear was recorded as yours.
 
 ## The one-line version
 
-Every agent write to an issue is attributed to a **heartbeat run**. The run is
-named by the `run_id` claim inside `PAPERCLIP_API_KEY` (which is a JWT), and
-optionally echoed in the `X-Paperclip-Run-Id` header. If the server cannot
-resolve that pair to a live run, it refuses **every** comment and every status
-write in the run — not just cross-issue ones. `PAPERCLIP_TASK_ID` has nothing
-to do with it.
+Every agent write to an issue is attributed to a **heartbeat run**, and there
+are two distinct ways that goes wrong:
+
+| | Family 1: **refused** | Family 2: **laundered** |
+|---|---|---|
+| What you see | `403 cross_issue_influence_run_context_required` | `2xx`. Nothing looks wrong. |
+| What happened | The run could not be resolved, so the write was rejected | The credential was not read, so the write was accepted **as the board** |
+| Stored as | nothing | `authorType: user` / `authorUserId: local-board` / `createdByRunId: null` |
+| Scope | the whole run, deterministically | every call that is malformed the same way |
+| Detected by | `paperclip-run-check.sh` exit `1` | `paperclip-run-check.sh` exit `3` |
+
+Family 1 is the loud one and is what this document was originally written about.
+Family 2 is the dangerous one, because a laundered write succeeds: the run gets
+no error, and the *reader* of the issue is the one who is misled.
+
+For family 1: the run is named by the `run_id` claim inside `PAPERCLIP_API_KEY`
+(which is a JWT), and optionally echoed in the `X-Paperclip-Run-Id` header. If
+the server cannot resolve that pair to a live run, it refuses **every** comment
+and every status write in the run — not just cross-issue ones.
+`PAPERCLIP_TASK_ID` has nothing to do with it.
 
 ## How run attribution actually works
 
@@ -52,7 +69,7 @@ skill and is good practice — it is what turns a stale-credential bug into a
 loud `422` instead of a silent misattribution — but adding the header cannot
 rescue a token that is bound to the wrong run.
 
-## Decoding the 403 you actually hit
+## Failure family 1: decoding the 403 you actually hit
 
 `cross_issue_influence_run_context_required` is badly named. Its own copy, in
 Paperclip's `packages/shared/src/issue-write-denial.ts`, reads:
@@ -121,6 +138,181 @@ The actual containment boundary is the OS uid. Ruling: `DEC-0016` (APP-73).
 Full model: `docs/containment-model.md`. **Do not probe the unauthenticated
 write path** — the mechanism is established, and a write probe would itself
 create the unattributed write `DEC-0016` records as an accepted cost.
+
+What that mode does to a write you *did not mean* to send uncredentialed is
+failure family 2, below. It is the same middleware behaviour seen from the other
+side: here it is a containment observation, there it is a bug that lands in your
+own issue threads.
+
+## Failure family 2: the laundered write
+
+This is the failure the 403 decoder above cannot see, because there is no error
+to decode. Added for [APP-119](/APP/issues/APP-119) after it was observed doing
+real damage on [APP-78](/APP/issues/APP-78) on 2026-09-28.
+
+### What `local_trusted` does with a request it reads as uncredentialed
+
+As noted above, this instance runs with `server.deploymentMode =
+"local_trusted"`, in which the auth middleware defaults every request's actor to
+board / instance-admin **before** examining any credential. The asymmetry that
+matters:
+
+| Request | Result |
+|---|---|
+| `Authorization: Bearer <valid token>` | accepted as the **agent** |
+| a *malformed* credential | correctly **rejected** |
+| **no** credential the middleware recognises | accepted as the **board** |
+
+The third row is the trap, and you reach it by accident far more often than on
+purpose. Sending
+
+```
+X-Paperclip-Api-Key: $PAPERCLIP_API_KEY      # WRONG - header name is not recognised
+```
+
+instead of
+
+```
+Authorization: Bearer $PAPERCLIP_API_KEY     # right
+```
+
+means the token is present in the request and completely ignored. The header is
+unrecognised, so the request counts as presenting *no* credential, lands in row
+three, and succeeds. Three different agent seats made exactly this typo in a
+single day, and one repeated it six minutes after writing up the disclosure — so
+knowing about it is demonstrably not the same as not doing it.
+
+### The stored-row signature
+
+A laundered write is stored as:
+
+```
+authorType       "user"          (not "agent")
+authorUserId     "local-board"   (the founder sentinel)
+authorAgentId    null
+createdByRunId   null            (no run owns it)
+```
+
+and in the issue activity log (`GET /api/issues/{id}/activity`) as
+`actorType: "user"` / `actorId: "local-board"` / `runId: null`.
+
+**Two fields are not part of the signature.** `responsibleUserId` on an
+activity row, and `onBehalfOfUserId` on a comment row, both read `local-board` on
+a *correctly* attributed agent write — they name the human whose authority the
+agent rides, copied from the token's own `responsible_user_id` claim. Testing
+either would flag every healthy run. The signal is `authorType` / `actorType`
+plus the actor id, never the on-behalf-of field. A correct agent comment row
+looks like this, `local-board` and all:
+
+```
+authorType "agent", authorAgentId "<you>", authorUserId null,
+createdByRunId "<your run>", onBehalfOfUserId "local-board"
+```
+
+### Why it is not merely a mislabel
+
+The control plane applies **founder semantics** to a board write, so the
+misattribution changes behaviour:
+
+- A board comment on an issue fires an `issue_commented` wake. On APP-78 this
+  woke the CEO to answer a comment the CEO's own run had written.
+- A board comment on a closed issue **reopens** it, where an agent comment is
+  inert without `resume: true`. One mistyped header moved an issue from `done`
+  back to `todo` and cancelled its scheduled retry run. Nobody chose either
+  effect.
+- Other agents treat board-authored records as higher-trust input. A QA verdict
+  or bug report stamped `local-board` reads as a founder instruction rather than
+  as an agent finding open to challenge on the merits.
+
+The same path has been observed closing issues, releasing a `checkoutRunId`,
+re-parenting an issue, archiving an item from the founder's inbox, and creating
+issues that then read as founder-filed.
+
+### Why the server cannot always recover it
+
+There is a recovery mechanism, and it is weaker than it looks.
+`deriveIssueCommentRunLogAttribution`
+(`@paperclipai/server/dist/services/issues.js:852`, v2026.916.1 — re-read
+2026-09-29) fills in `derivedAuthorAgentId` / `derivedAuthorSource` for rows that
+have an `authorUserId` and no `authorAgentId`. But it is a **read-time**
+derivation, computed when the comments endpoint is queried — nothing is stored at
+write time — and it has exactly two lossless tiers:
+
+1. `run_id` — the row's own `createdByRunId` resolves to an agent run.
+2. `run_log_comment_post` — an overlapping run log contains the literal marker
+   `comment id: {id}`.
+
+The `X-Paperclip-Run-Id` header is **not** a tier. A laundered row has
+`createdByRunId: null` by construction, so tier 1 cannot fire; if the run log
+never happened to record the comment id, tier 2 cannot either, and the row reads
+as a genuine founder write **forever**. The code refuses to close that gap with
+run-window timing overlap, and says why in its own comment: because agents post
+through the `local-board` subprocess, "an agent comment and a genuine human board
+comment are indistinguishable rows", so a timing guess would mis-attribute real
+human board comments that merely coincided with an agent run.
+
+So: unrecoverable by design, in the common case. This is what happened to the
+CEO's completion comment on APP-78, which the CEO had to claim by hand.
+
+### The standing habit
+
+1. Send **both** headers on every control-plane call, reads included:
+
+   ```
+   -H "Authorization: Bearer $PAPERCLIP_API_KEY"
+   -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID"
+   ```
+
+2. **After every write, read the response body and confirm the attribution.**
+   Checking at write time is the only reliable detection, because the server's
+   recovery path runs later and often fails. For a comment:
+
+   ```
+   curl -sS -X POST "$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/comments" \
+     -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+     -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
+     -H 'Content-Type: application/json' -d "$BODY" \
+   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+       const c=JSON.parse(s);
+       console.log(c.authorType, c.authorAgentId ?? c.authorUserId);
+       if (c.authorType !== "agent") process.exit(3);
+     })'
+   ```
+
+3. **Never use the uncredentialed path deliberately, and never probe it with a
+   write.** It is not a fallback — not for a board-gated route, not for anything
+   a permission grant will not open. Reads behave identically either way, so
+   read-only reproduction is always enough to investigate this class of bug. A
+   lock or a gate that blocks a step is answered by a board approval, not by a
+   credential-less request.
+
+Note what `paperclip-run-check.sh` can and cannot do here. It sends its own
+probe correctly, so exit `0` proves the control plane attributes a
+**correctly formed** write from this run to this agent. It cannot see a later
+call of yours that launders itself under the wrong header name. Exit `0` is a
+statement about the control plane, not a licence to stop checking your own calls.
+
+### The remedy when it has already happened
+
+**Claim the write in a follow-up comment on the affected issue. Do not delete or
+edit the mis-stamped record.**
+
+The mis-stamped row is the audit evidence; reversing it on your own authority
+destroys that, and is the same class of error as acting on your own authority in
+the first place. Post a correctly attributed comment saying which run made the
+write and what it was, so a reader of the thread is not left taking a founder
+label at face value.
+
+If authorship is disputed later, do not rest the claim on the mis-stamped body's
+own prose — an audit should not have to take a self-description at face value.
+`GET /api/issues/{id}/activity` carries better evidence: a board-stamped
+`issue.updated` that releases a checkout records `checkoutRunId`,
+`executionRunId` and `executionAgentNameKey` going to `null`, and only the run
+holding that lock could have released it. Compare event timestamps rather than
+assuming a reported grouping is accurate — on [APP-94](/APP/issues/APP-94) the
+sweep described one request, and the log showed the comment 4.5 seconds clear of
+the archive/close pair, meaning the mistyped header was on the run's whole write
+path rather than on a single call.
 
 ## Task binding is a second, separate binding — and an unbound run can still take a lock
 
@@ -390,7 +582,7 @@ Paperclip runtime**. There is no launcher change that binds a run; the launcher
 is not in that path. Fixes for the run-binding and error-code asks belong
 upstream.
 
-## What to do when your writes 403
+## What to do when a write fails, either way
 
 In order:
 
@@ -404,14 +596,29 @@ In order:
    (`.../projects/<company>/<project>/_default`), not this checkout, so a
    relative `scripts/...` path will not resolve from where you are standing.
 
-   It decodes the token's `run_id` claim, compares it to `$PAPERCLIP_RUN_ID`,
-   and does one cheap authenticated write probe — a PATCH that re-sends the
-   issue's current priority, so it changes no field value, though it does bump
-   `updatedAt`. Exit `0` means the probe returned 2xx and this run can write;
-   `1` means every write in this run will 403; `2` means the check could not be
-   completed and proves nothing — it is not an all-clear. Only exit `0` is
-   evidence: the token always carries *some* `run_id` claim, so the claim on its
-   own cannot distinguish a live binding from a dead one.
+   It decodes the token's `run_id` and `sub` claims, compares the run id to
+   `$PAPERCLIP_RUN_ID`, does one cheap authenticated write probe — a PATCH that
+   re-sends the issue's current priority, so it changes no field value, though it
+   does bump `updatedAt` — and then reads the issue activity log back to check
+   **how that write was recorded**. The read-back is why the probe now catches
+   family 2: a laundered write returns 2xx, so the HTTP status alone gives a run
+   that is about to misattribute every comment a clean bill of health.
+
+   | Exit | Meaning |
+   |---|---|
+   | `0` | probe returned 2xx **and** the write was recorded as this agent and this run — write normally |
+   | `1` | family 1: every write in this run will 403 — use the courier pattern |
+   | `2` | UNVERIFIED — the check could not be completed, or the probe landed but its attribution could not be read back. Not an all-clear. |
+   | `3` | family 2: the write SUCCEEDED but was recorded as the board — do not write |
+
+   Only exit `0` is evidence. The token always carries *some* `run_id` claim, so
+   the claim on its own cannot distinguish a live binding from a dead one; and a
+   2xx on its own cannot distinguish your write from the board's.
+
+   On `3`, do not write this heartbeat: report the run id in your final response
+   and deliver there. The attribution read-back needs `GET
+   /api/issues/{id}/activity`; if that read fails the script returns `2` rather
+   than `0`, because an unverified attribution is not a clean one.
 
 2. **Do not go silent.** A run that cannot comment still looks, from the
    outside, like an agent that chose not to say anything. That is how two days
