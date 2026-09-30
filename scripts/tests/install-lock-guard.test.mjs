@@ -35,19 +35,17 @@ function install(h, args = [], extraEnv = {}) {
 }
 
 const mode = (p) => (statSync(p).mode & 0o777).toString(8);
+// plutil is macOS-only and this suite also runs on Linux CI, so parse plists with Python's
+// plistlib (present on both). plistGet takes a dotted keypath; numeric parts index arrays.
+const py = (code, ...args) => execFileSync('python3', ['-c', code, ...args], { encoding: 'utf8' }).trim();
+const plistLint = (file) => py('import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))', file);
 const plistGet = (file, key) =>
-  execFileSync('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', file], { encoding: 'utf8' }).trim();
-
-/**
- * plutil(1) ships only with macOS, so the assertions that read the *contents* of a
- * rendered plist cannot run on the Linux CI runner. Everything else in this file --
- * where files land, their modes, the refusals, what the installer prints -- is
- * portable and still runs there. The gated assertions announce themselves via
- * t.diagnostic() rather than disappearing, so a green Linux run never reads as
- * fuller coverage than it is.
- */
-const DARWIN = process.platform === 'darwin';
-const SKIPPED = 'plist-content assertions need plutil(1) (macOS-only); the rest of this test ran';
+  py(
+    'import plistlib,sys\nd=plistlib.load(open(sys.argv[1],"rb"))\n' +
+      'for part in sys.argv[2].split("."):\n  d = d[int(part)] if isinstance(d, list) else d[part]\nprint(d)',
+    file,
+    key,
+  );
 
 test('deploys the guard to ~/.appforge-ops/bin (0555, identical to the repo copy) by default', () => {
   const h = makeHome();
@@ -109,7 +107,7 @@ test('does not mistake the lookalike ~/.appforge-ops (or ~/.appforge-anything) f
   }
 });
 
-test('renders the plist: topic filled from .envrc, 0600, valid, no placeholder, points at the deployed script', (t) => {
+test('renders the plist: topic filled from .envrc, 0600, valid, no placeholder, points at the deployed script', () => {
   const h = makeHome();
   try {
     const opsDir = path.join(h.home, 'ops-elsewhere');
@@ -118,23 +116,17 @@ test('renders the plist: topic filled from .envrc, 0600, valid, no placeholder, 
     const out = path.join(h.dest, 'ing.paperclip.appforge-lock-guard.plist');
     assert.ok(existsSync(out));
     assert.equal(mode(out), '600');
+    plistLint(out);
     const text = readFileSync(out, 'utf8');
     assert.ok(!text.includes('__NTFY_TOPIC__'), 'placeholder must be substituted');
     assert.ok(text.includes(TOPIC), 'topic from .envrc should be in the rendered plist');
-    if (DARWIN) {
-      execFileSync('/usr/bin/plutil', ['-lint', out]);
-      assert.equal(plistGet(out, 'ProgramArguments.1'), path.join(opsDir, 'bin', NAME),
-        'the plist must run the script the installer just deployed, wherever --ops-dir put it');
-    } else {
-      assert.ok(text.includes(path.join(opsDir, 'bin', NAME)),
-        'the plist must name the script the installer just deployed, wherever --ops-dir put it');
-      t.diagnostic(SKIPPED);
-    }
+    assert.equal(plistGet(out, 'ProgramArguments.1'), path.join(opsDir, 'bin', NAME),
+      'the plist must run the script the installer just deployed, wherever --ops-dir put it');
     assert.doesNotMatch(r.stdout + r.stderr, new RegExp(TOPIC), 'the topic must never be echoed');
   } finally { rmSync(h.home, { recursive: true, force: true }); }
 });
 
-test('no topic anywhere: still installs, ntfy is disabled, and it says so', (t) => {
+test('no topic anywhere: still installs, ntfy is disabled, and it says so', () => {
   const h = makeHome();
   try {
     writeFileSync(h.envrc, 'export UNRELATED="1"\n');
@@ -142,13 +134,7 @@ test('no topic anywhere: still installs, ntfy is disabled, and it says so', (t) 
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /ntfy: disabled/);
     const out = path.join(h.dest, 'ing.paperclip.appforge-lock-guard.plist');
-    if (DARWIN) {
-      assert.equal(plistGet(out, 'EnvironmentVariables.NTFY_TOPIC'), '');
-    } else {
-      assert.match(readFileSync(out, 'utf8'), /<key>NTFY_TOPIC<\/key>\s*<string><\/string>/,
-        'NTFY_TOPIC must be rendered empty, not left as the placeholder');
-      t.diagnostic(SKIPPED);
-    }
+    assert.equal(plistGet(out, 'EnvironmentVariables.NTFY_TOPIC'), '');
   } finally { rmSync(h.home, { recursive: true, force: true }); }
 });
 
@@ -164,17 +150,11 @@ test('re-running over an existing read-only (0555) deployment succeeds and re-lo
   } finally { rmSync(h.home, { recursive: true, force: true }); }
 });
 
-test('the COMMITTED plist agrees with the installer: runs ~/.appforge-ops/bin/…, never ~/.appforge/…', (t) => {
+test('the COMMITTED plist agrees with the installer: runs ~/.appforge-ops/bin/…, never ~/.appforge/…', () => {
   const text = readFileSync(PLIST, 'utf8');
-  if (DARWIN) {
-    execFileSync('/usr/bin/plutil', ['-lint', PLIST]);
-    const script = plistGet(PLIST, 'ProgramArguments.1');
-    assert.ok(script.endsWith(`/.appforge-ops/bin/${NAME}`), script);
-  } else {
-    assert.match(text, new RegExp(`<string>[^<]*/\\.appforge-ops/bin/${NAME}</string>`),
-      'the committed plist must run the guard from ~/.appforge-ops/bin');
-    t.diagnostic(SKIPPED);
-  }
+  plistLint(PLIST);
+  const script = plistGet(PLIST, 'ProgramArguments.1');
+  assert.ok(script.endsWith(`/.appforge-ops/bin/${NAME}`), script);
   assert.doesNotMatch(text, /\/\.appforge\//, 'no reference to the CTO-owned ~/.appforge tree');
   assert.match(text, /__NTFY_TOPIC__/, 'the committed template must carry the placeholder, not a real topic');
 });
