@@ -123,6 +123,26 @@ because the tree happened to be byte-identical that time.
   its owner to reclaim or discard. Exercising that judgement is the point of
   this section, not an exception to it.
 
+## Repo scope — check it before you implement (APP-251)
+
+Your run's GitHub token covers only the repos in `APPFORGE_AGENT_REPOS`, which
+is set **per agent**. A repo outside it fails `git push` with `remote:
+Repository not found.` — which reads like a missing repo or a broken token and
+is neither.
+
+```
+~/git-personal/appforge-control/scripts/repo-scope-check.sh <repo>   # or no args, inside the repo
+```
+
+Exit 0 = in scope, 1 = out of scope (escalate before implementing, not after),
+2 = unverified. It reads two env vars, makes no network call, and costs
+nothing. Run it at turn one on any task that will end in a push.
+
+If it says out of scope, do **not** conclude the App is uninstalled:
+`GET /installation/repositories` returns *your token's* repos, not the
+installation's, so it will agree with you and prove nothing. Full explanation:
+`docs/agent-repo-scope.md`.
+
 ## Capabilities (from `config/agents.yaml`)
 `paperclip:company`, `metrics:read`, `brain:pr`.
 
