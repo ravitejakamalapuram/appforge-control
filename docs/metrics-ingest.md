@@ -311,12 +311,131 @@ Analyst's read of Play's report schema is second-hand — Analyst has no store
 access, by design. **Confirm against the first real export and report back if
 the schema differs.**
 
-### 4.4 Status
+### 4.4 The importer — built, and what it deliberately does not do
 
-The path is documented. **The service account has not been created and no
-secret has been bound** — both need founder Play Console access.
-`scripts/metrics-import.mjs` therefore refuses `--source play` with a loud
-error rather than writing a half-formed manifest entry.
+APP-210. `scripts/lib/play-report.mjs` parses a Play statistics report;
+`--source play` is implemented and no longer refuses. It consumes a **file**
+the ingest job downloaded from the bucket: the script opens no socket, reads no
+credential, and has no code path to one. §6.1 rule 4 holds structurally here
+rather than by discipline.
+
+Three decisions in it are worth reading before the first real report lands,
+because each one is a place a careless import would produce a plausible wrong
+number.
+
+**Encoding is observed, not assumed.** Play's reports are widely *said* to be
+UTF-16 with a byte-order mark, and a mangled header row is the usual first
+symptom of getting that wrong. `decodeReport` branches on the actual BOM bytes
+and records which branch it took in `notes.encoding_detected`. A big-endian BOM
+is **refused** rather than read little-endian, because that failure mode is
+silent — every character transposed, no error.
+
+**The device/user split is resolved once, on purpose.** Play reports most
+quantities twice: once counting devices, once counting Google accounts. They
+are different numbers. We take the **device** family throughout, for one
+non-aesthetic reason: `play_active_devices_30d` exists *only* in the device
+family, so a user-family numerator over a device-family denominator would be
+exactly the category error `forbidden_aliases` exists to stop. The user-family
+columns are reported as `unmapped_headers`, never silently dropped, and
+`FAMILY_CHOICE` states the reason in the module.
+
+**Every mapping is `confirmed: false`.** Same posture as CWS, same reason:
+Analyst's read of Play's schema is second-hand, Analyst has **no store access
+by design**, and no real Play report has ever reached this repository. The
+fixtures are named `*-SYNTHETIC.csv` and their package id is suffixed
+`.SYNTHETIC` so it cannot be mistaken for InvTrack's real application id —
+which, note, this repo does not know: `config/portfolio.yaml` holds no package
+names. The parser records `package_names_verbatim`, so the first real report
+answers that too.
+
+### 4.5 No weekly figure was synthesized — the written confirmation
+
+APP-210 asks for this in writing. Stating it plainly:
+
+> **No weekly-distinct figure has been derived from Play daily active devices,
+> and none can be.** Play's reports carry daily and cumulative columns only.
+> Summing seven daily active-device values counts a device once per day it was
+> active, so the total has no referent — it is not an approximation of a weekly
+> distinct count, it is a different and meaningless quantity. Nothing in the
+> ingest computes one, and DEC-0009 D5 rejected the substitution by name.
+
+It is not left to good intentions. Four mechanisms, in increasing order of how
+hard they are to defeat:
+
+1. **No cross-row aggregation anywhere.** Values are read from the single row
+   whose date equals `as_of`. No sum, mean, rolling window, or fill-forward
+   exists in the module. The fixture's daily installs are 4, 6, 3 precisely so
+   a test can assert the emitted value is `3` and **not** `13`.
+2. **`assertNoWeeklySynthesis`** runs on the way out of every parse and throws
+   on any metric name matching `/weekly|wau/i`, plus `cws_weekly_users` and
+   `true_wau` by name. Adding a weekly row to `HEADER_MAP` therefore makes the
+   import **fail**; it cannot quietly start emitting one. There is a test that
+   does exactly that edit and asserts the throw.
+3. **The manifest says so.** Each Play entry carries
+   `notes.synthesized_metrics: []`, `notes.aggregation: "none — single row,
+   as_of"`, and `notes.weekly_distinct` with reason code
+   `play_wau_unavailable`. A reader asking "was anything here computed rather
+   than read?" answers it from the record, not from this document.
+4. **`forbidden_aliases`** still refuses the substitution downstream even if
+   something bypassed all of the above, via `assertNotAliased`.
+
+`play_active_devices_30d` also carries a **semantic caveat** into the manifest,
+and it is the first thing to check against real bytes: Play's figure counts
+**devices that were active with the app installed** — device activity, not app
+usage. A device that has never opened the app still counts. So it is not
+`true_wau` (use) and not `cws_weekly_users` (a weekly install reading on a
+different store). Three quantities, three names. **The 30-day window in the
+metric's own name is second-hand and unconfirmed** — the real report has to
+prove it, and if it turns out to be a different window the metric is misnamed
+and must be renamed, not reinterpreted.
+
+### 4.6 What the first real report has to settle
+
+The schema check APP-210 asks for, written down before the bytes arrive so it
+cannot be graded on a curve afterwards. Run:
+
+```
+node scripts/metrics-import.mjs --source play --item invtrack \
+    --file <installs_overview.csv> --package <application id>
+```
+
+and compare the printed provenance block against this list. **Any difference
+gets reported back on APP-42**, because each one falsifies something Analyst
+inferred without access:
+
+| Question | Second-hand expectation | How the report answers it |
+|---|---|---|
+| Encoding | UTF-16LE with BOM | `encoding_detected` |
+| Install column | `Daily Device Installs` | appears in `unmapped_headers` if wrong |
+| Uninstall column | `Daily Device Uninstalls` | same |
+| 30-day active column | `Active Device Installs` | same |
+| Its actual window | 30 days | **not in the CSV** — needs Play's own column documentation; if it is not 30, `play_active_devices_30d` is misnamed |
+| Rating column | `Total Average Rating` (lifetime) | ratings report, separate file |
+| Date column | `Date`, `YYYY-MM-DD` | refuses outright if absent |
+| Package id | unknown to this repo | `package_names_verbatim` |
+| A weekly-distinct column | **none exists** | if one *does* appear, that is news and changes §4.3 — report it, do not map it silently |
+
+The last row is the one to read twice. The whole asymmetry argument rests on
+Play publishing no weekly-distinct figure. If a real report contradicts that,
+the finding is more valuable than the convenience.
+
+### 4.7 Status
+
+- **Importer: built and tested** (`scripts/lib/play-report.mjs`, 15 tests in
+  `scripts/tests/play-report.test.mjs` plus 4 end-to-end in
+  `metrics-import.test.mjs`). `--source play` lands a manifest entry with a
+  derived `lag_days`.
+- **Service account: not created. Secret: not bound.** Both need founder Play
+  Console access — §4.1 steps 1–4. This is the only thing left, and no agent
+  can do it.
+- **No real report has landed**, so every mapping is still `confirmed: false`
+  and nothing has been imported into `data/metrics/manifest.jsonl` from this
+  source. The synthetic fixtures were run against a scratch data root on
+  purpose; putting a synthetic reading in the real manifest would be the exact
+  error the `*-SYNTHETIC` naming exists to prevent.
+- `teleport` is **internal-track only** (`store_item_status: internal_track`),
+  so its bulk reports may be empty or absent even after the grant. An absent
+  report must read `missing`, never `0` — §7.
 
 ---
 
