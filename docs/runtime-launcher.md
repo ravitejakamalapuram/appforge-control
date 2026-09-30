@@ -47,6 +47,16 @@ It also refuses a dirty source checkout. `--allow-dirty` proceeds but stamps
 that checkout and it is dirty most of the time, so `--allow-dirty` is expected
 in practice — the point is that it leaves evidence, not that it never happens.
 
+`detect-launcher-drift.mjs` reads that evidence back (APP-263). The tree state
+and the dirty paths go on the provenance line of every run and in the report
+header, so a reader judging a `stale` finding can see whether the install commit
+actually describes what is installed. For a versioned file that was dirty at
+install, the report states whether its installed digest equals the blob at
+`source_commit`; when it does not, the `source_commit..ref_tip` diff describes a
+transition that never happened, so the finding is pinned at `high` and no
+comment-only downgrade is allowed to apply. A manifest with no
+`source_tree_state` at all reads as `unknown`, never as `clean`.
+
 Every versioned file is materialised with `git show <commit>:<path>`. The
 working tree is never read for a file that lives in a commit, so byte-identity
 with the reviewed ref is a property of the construction rather than something
