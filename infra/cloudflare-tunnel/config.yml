@@ -1,0 +1,37 @@
+# cloudflared config for the appforge-webhook tunnel (P1-03, master plan §4.4).
+#
+# Scope: this tunnel exposes exactly ONE path — the Paperclip routine trigger's public webhook
+# fire endpoint for the "GitHub CI/PR notifications (json-workbench)" routine — and nothing else.
+# It does not proxy Paperclip's dashboard, its general REST API, or any other routine's webhook.
+# A request to any other path on the public hostname gets a plain 404 from cloudflared itself,
+# without ever reaching Paperclip.
+#
+# The trigger's publicId below is not itself a secret (it's meant to be part of a public URL, per
+# Paperclip's own webhook design — see @paperclipai/server's routines.js) — the HMAC secret is
+# what actually authorizes a call (see appforge-control/secrets/notify-paperclip.webhook-secret.json,
+# gitignored, and the matching PAPERCLIP_WEBHOOK_SECRET GitHub Actions secret in each caller repo).
+#
+# Hostname: this tunnel deliberately uses its default <tunnel-id>.cfargotunnel.com hostname rather
+# than a subdomain of any existing zone in this Cloudflare account (e.g. echo-kit.com) — Paperclip
+# is shared control-plane infra for every product repo, not part of any single app, so it gets no
+# dependency on another app's domain (see confirm-architecture-extensible: no app should depend on
+# another app's repo or credentials — the same principle applies to domains). No `cloudflared
+# tunnel route dns` step is needed for this hostname.
+#
+# TUNNEL_ID and CREDENTIALS_FILE are filled in by setup.sh once the tunnel is created — see
+# infra/cloudflare-tunnel/README.md for the one-time founder step this depends on
+# (`cloudflared tunnel login`, which needs an interactive browser auth the CLI cannot do).
+
+tunnel: __TUNNEL_ID__
+credentials-file: __CREDENTIALS_FILE__
+
+ingress:
+  # Paperclip routine trigger publicId 9dabc06113842e4b28185b1d — "GitHub CI/PR notifications
+  # (json-workbench)" routine, github_hmac-signed webhook trigger (see
+  # appforge-control/secrets/notify-paperclip.webhook-secret.json for the full record).
+  - hostname: __TUNNEL_HOSTNAME__
+    path: ^/api/routine-triggers/public/9dabc06113842e4b28185b1d/fire$
+    service: http://127.0.0.1:3100
+  # Everything else on this hostname (Paperclip's dashboard, other API routes, other routines'
+  # webhooks) is refused at the tunnel — never proxied to 127.0.0.1:3100.
+  - service: http_status:404
