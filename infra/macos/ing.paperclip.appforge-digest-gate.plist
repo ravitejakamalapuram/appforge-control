@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- No PAPERCLIP_API_KEY. digest-gate.sh deliberately does not require one:
+		     the control plane serves these GETs unauthenticated on 127.0.0.1, and
+		     minting a long-lived key would put a standing credential on disk. -->
+		<key>PAPERCLIP_API_URL</key>
+		<string>http://127.0.0.1:3100</string>
+		<key>PAPERCLIP_COMPANY_ID</key>
+		<string>18b2b6ef-fbaa-48d1-acf4-168841c269ae</string>
+		<key>NTFY_TOPIC</key>
+		<string>__NTFY_TOPIC__</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/rkamalapuram</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control</string>
+	<key>ExitTimeOut</key>
+	<integer>300</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>ing.paperclip.appforge-digest-gate</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/infra/macos/digest-gate.sh</string>
+	</array>
+	<!-- RunAtLoad false on purpose. Loading this agent (a laptop reboot, a repair
+	     run) must not fire Analyst's wake off-schedule; the 06:30 slot is the
+	     contract in §6.2. A missed day is cheaper than an unscheduled model call. -->
+	<key>RunAtLoad</key>
+	<false/>
+	<!-- StartCalendarInterval is LOCAL time. This machine runs Asia/Kolkata, which
+	     is the timezone §6.2 states for the 06:30 wake, so 6:30 here is 06:30 IST.
+	     If the laptop's timezone ever changes, this needs changing with it -
+	     launchd has no per-job timezone. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>6</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/digest-gate.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/digest-gate.log</string>
+</dict>
+</plist>

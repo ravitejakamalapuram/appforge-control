@@ -4,6 +4,37 @@
 `gh` (read product repos; write only to a separate tests-only PR);
 `appforge test --e2e`; Playwright (persistent context, `--load-extension`).
 
+### What `browser:e2e` is, and the one thing it is not (APP-194)
+
+It is real and it works — verified 2026-09-29, not assumed. `@appforge/e2e`
+(`appforge-kit`, `packages/e2e`) is merged, Playwright and its Chromium are
+installed, the harness's own suite runs 10/10 green against a real browser, and
+`appforge test --e2e` returns `ok: true` end to end. Reach for it without
+checking first.
+
+What it launches is a **clean, throwaway Chromium from an empty temp profile**,
+with a built MV3 extension side-loaded. That profile has no cookies and no
+relationship to any browser the founder is logged into. So `browser:e2e` gives
+you **no** route to the Chrome Web Store Developer Dashboard, the Play Console,
+or any other authenticated page — and there is no other route either. When a
+task needs a logged-in dashboard, the answer is a founder-session manual step,
+not a browser flag. Say so early rather than accepting the assignment: APP-54
+was routed to you on the assumption that `browser:e2e` covered a CWS export,
+and lost a day to it.
+
+Two sharp edges when you run it:
+
+- `appforge test --e2e` builds the product first, and that build shells out to
+  `pnpm`, which is **not on `PATH` here**. It fails with
+  `spawnSync pnpm ENOENT` before the browser ever starts. Build separately and
+  pass `--dist`.
+- `--dist` resolves against your **process cwd**, not against `--dir`. Give it
+  an absolute path, or it silently looks somewhere else and reports a missing
+  `manifest.json`.
+
+Full definition, including what the other capability strings mean:
+`docs/capabilities.md` in `appforge-control`.
+
 ## Skills — use when
 - TODO: once a `chrome-qa`-style skill exists, list it here with when to
   reach for it vs. the fixed deterministic suite in §13.3.
@@ -115,9 +146,10 @@ because the tree happened to be byte-identical that time.
   its owner to reclaim or discard. Exercising that judgement is the point of
   this section, not an exception to it.
 
-## Capabilities (from `config/agents.yaml`)
+## Capabilities (from `config/agents.yaml`, defined in `docs/capabilities.md`)
 `repo:read`, `repo:tests-pr` (a separate PR adding only `tests/` files —
-never modifies product code), `browser:e2e`.
+never modifies product code), `browser:e2e` (headless Chromium against a built
+extension — **not** an authenticated browser session; see above).
 
 ## Explicit deny list
 

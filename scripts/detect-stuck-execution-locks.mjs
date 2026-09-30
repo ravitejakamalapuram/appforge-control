@@ -17,6 +17,7 @@
 //   node scripts/detect-stuck-execution-locks.mjs
 //   node scripts/detect-stuck-execution-locks.mjs --json
 //   node scripts/detect-stuck-execution-locks.mjs --grace-minutes 60 --escalate-hours 2
+//   node scripts/detect-stuck-execution-locks.mjs --unbound-grace-minutes 15
 //
 // Auth: PAPERCLIP_API_URL + PAPERCLIP_API_KEY + PAPERCLIP_COMPANY_ID, which a
 // heartbeat run already has injected. No extra credential is needed, and the
@@ -28,21 +29,29 @@ import {
   selectLockedIssues,
   DEFAULT_QUEUED_GRACE_MS,
   DEFAULT_ESCALATION_AGE_MS,
+  DEFAULT_UNBOUND_HOLDER_GRACE_MS,
 } from './lib/detect-stuck-execution-locks.mjs';
 
 const LOCKABLE_STATUSES = 'todo,in_progress,in_review,blocked';
 
 function parseArgs(argv) {
-  const args = { json: false, graceMs: DEFAULT_QUEUED_GRACE_MS, escalateMs: DEFAULT_ESCALATION_AGE_MS };
+  const args = {
+    json: false,
+    graceMs: DEFAULT_QUEUED_GRACE_MS,
+    escalateMs: DEFAULT_ESCALATION_AGE_MS,
+    unboundGraceMs: DEFAULT_UNBOUND_HOLDER_GRACE_MS,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--json') args.json = true;
     else if (arg === '--grace-minutes') args.graceMs = Number(argv[++i]) * 60 * 1000;
     else if (arg === '--escalate-hours') args.escalateMs = Number(argv[++i]) * 60 * 60 * 1000;
+    else if (arg === '--unbound-grace-minutes') args.unboundGraceMs = Number(argv[++i]) * 60 * 1000;
     else throw new Error(`unknown argument: ${arg}`);
   }
   if (!Number.isFinite(args.graceMs) || args.graceMs < 0) throw new Error('--grace-minutes must be a non-negative number');
   if (!Number.isFinite(args.escalateMs) || args.escalateMs < 0) throw new Error('--escalate-hours must be a non-negative number');
+  if (!Number.isFinite(args.unboundGraceMs) || args.unboundGraceMs < 0) throw new Error('--unbound-grace-minutes must be a non-negative number');
   return args;
 }
 
@@ -107,6 +116,7 @@ async function main() {
     now: Date.now(),
     queuedGraceMs: args.graceMs,
     escalationAgeMs: args.escalateMs,
+    unboundHolderGraceMs: args.unboundGraceMs,
   });
 
   // Exclude this run's own lock: the detector necessarily holds a lock on the

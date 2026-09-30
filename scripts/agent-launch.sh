@@ -320,6 +320,10 @@ export GITHUB_TOKEN="$GH_TOKEN"
 # The header is basic auth over `x-access-token:<token>`, GitHub's documented
 # form for App installation tokens. It is no more exposed than GH_TOKEN, which
 # is already in this environment.
+# Agents: this is the ONLY credential setup a run needs. Passing the same
+# header again via `git -c http.*.extraheader=...` sends Authorization twice
+# and GitHub answers 400 "Duplicate header", which reads like a bad token and
+# is not one. See docs/git-credentials-in-agent-runs.md (APP-190 / APP-197).
 GIT_AUTH_B64="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
 export GIT_CONFIG_COUNT=2
 export GIT_CONFIG_KEY_0=credential.helper

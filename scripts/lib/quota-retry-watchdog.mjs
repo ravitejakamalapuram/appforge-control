@@ -282,6 +282,33 @@ export function resetBackoffAttempt(state, agentId, { seenAt } = {}) {
   if (seenAt) agent.lastSuccessSeenAt = seenAt;
 }
 
+/**
+ * The issue a heartbeat run was bound to, or `null` for a run the runtime
+ * never bound to one.
+ *
+ * The read order deliberately mirrors the server's own
+ * `readRunSourceIssueId` (`services/cross-issue-influence-limit.js`):
+ * `contextSnapshot.issueId`, then `contextSnapshot.taskId`. That function is
+ * what decides whether a run may `PATCH` an issue or comment on it, so
+ * anything it would not accept must not be reported here as a binding.
+ * `nativeIssueId` is checked last as a column-level fallback for runs whose
+ * snapshot was written before the snapshot keys existed; it is the same issue
+ * by definition, and returning it can only ever turn an unbound wake into a
+ * bound one.
+ */
+export function readRunIssueId(run) {
+  const snapshot = run?.contextSnapshot;
+  const candidates = [
+    snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot.issueId : null,
+    snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot.taskId : null,
+    run?.nativeIssueId,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return null;
+}
+
 /** Records a pending pause->resume+wake action for an agent (one at a time; a new one overwrites a stale pending action for the same agent, e.g. a second quota failure before the first reset arrived). */
 export function setPendingAction(state, agentId, action) {
   state.pendingActions[agentId] = action;
