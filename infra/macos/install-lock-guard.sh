@@ -111,7 +111,11 @@ fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8") as f:
     f.write(text)
 PY
-plutil -lint "$tmp" >/dev/null || die "rendered plist failed plutil -lint"
+# plutil(1) is macOS-only. install-plists.sh already guards it this way; this
+# installer did not, so it died outright wherever plutil is absent.
+if command -v plutil >/dev/null 2>&1; then
+  plutil -lint "$tmp" >/dev/null || die "rendered plist failed plutil -lint"
+fi
 install -m 0600 "$tmp" "$PLIST_DST"
 chmod 600 "$PLIST_DST"
 
