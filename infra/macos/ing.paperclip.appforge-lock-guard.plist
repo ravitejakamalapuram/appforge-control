@@ -20,7 +20,7 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/rkamalapuram/.appforge/bin/paperclip-lock-guard.sh</string>
+		<string>/Users/rkamalapuram/.appforge-ops/bin/paperclip-lock-guard.sh</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

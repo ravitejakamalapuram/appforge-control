@@ -259,11 +259,24 @@ the lock is gone. A low-priority ntfy push is sent when it clears a lock.
 infra/macos/install-lock-guard.sh
 ```
 
-The script runs from `~/.appforge/bin/paperclip-lock-guard.sh` (a stable copy,
-mode 0555, next to `agent-launch.sh`), **not** from the shared checkout, whose
-branch changes under live agents. The committed plist carries a
-`__NTFY_TOPIC__` placeholder; the installer fills it from `~/git-personal/.envrc`
-so the topic is never committed.
+The script runs from `~/.appforge-ops/bin/paperclip-lock-guard.sh` (a stable
+copy, mode 0555), **not** from the shared checkout, whose branch changes under
+live agents, and **not** from `~/.appforge`. That directory belongs to the
+runtime-launcher installer, which redeploys it by stage-and-swap of the whole
+tree: on 2026-09-30 01:21 a swap deleted this script, the job started exiting
+127 and the guard went dark. `~/.appforge-ops` is written by nothing else, and
+the installer refuses (`--ops-dir` included, symlinks resolved) to place
+anything under `~/.appforge` or `~/.appforge.prev`.
+
+The committed plist carries a `__NTFY_TOPIC__` placeholder; the installer
+fills it from `$NTFY_TOPIC` or `~/git-personal/.envrc` and writes the result
+`0600`, so the topic is never committed or echoed. Flags: `--no-load`,
+`--ops-dir`, `--dest`, `--envrc` (the last three exist for the tests).
+
+The placeholder follows the same `__NAME__` convention as the generic
+`install-plists.sh` (PR #43), so that installer can render this template as
+well; it does not deploy the script, so `install-lock-guard.sh` remains the
+deploy step for this job.
 
 **Undo an automatic clear** (should never be needed): stop Paperclip, then
 `mv db/postmaster.pid.stale-<UTC> db/postmaster.pid`.
