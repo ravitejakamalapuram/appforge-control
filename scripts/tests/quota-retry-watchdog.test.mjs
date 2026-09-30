@@ -326,7 +326,7 @@ test('readRunIssueId: tolerates the snapshot shapes that are not objects, and bl
 // Bounded-pause invariant (APP-103 / DEBT-0003)
 // ---------------------------------------------------------------------------
 
-const SWEEP = { overdueMarginMs: 10 * 60_000, maxPauseMs: 12 * 3_600_000 };
+const SWEEP = { overdueMarginMs: 10 * 60_000, maxPauseMs: 12 * 3_600_000, maxQuotaPauseMs: 8 * 86_400_000 };
 
 test('a pause whose resume is not yet due is not swept', () => {
   const state = emptyState();
@@ -369,7 +369,7 @@ test('a pause with an unusable scheduled resume is swept immediately — the cei
   assert.ok(now);
 });
 
-test('the absolute maximum-pause ceiling fires even when the schedule claims the resume is still in the future', () => {
+test('the absolute maximum-pause ceiling fires on a backoff pause even when the schedule claims the resume is still in the future', () => {
   const state = emptyState();
   const now = 1_000_000_000;
   // A mangled reset parse that landed a week out: the first ceiling never
@@ -378,7 +378,7 @@ test('the absolute maximum-pause ceiling fires even when the schedule claims the
   recordWatchdogPause(state, 'agent-cto', {
     pausedAtMs: now,
     scheduledResumeAtMs: now + 7 * 86_400_000,
-    kind: 'quota',
+    kind: 'backoff',
     runId: 'r1',
   });
   assert.deepEqual(overduePauses(state, now + 11 * 3_600_000, SWEEP), [], 'inside 12h: still trusted');
@@ -390,11 +390,11 @@ test('the absolute maximum-pause ceiling fires even when the schedule claims the
 test('re-recording a pause refreshes the schedule but keeps the original pausedAtMs, so repeated failures cannot push the ceiling out forever', () => {
   const state = emptyState();
   const now = 1_000_000_000;
-  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now, scheduledResumeAtMs: now + 1000, kind: 'quota', runId: 'r1' });
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now, scheduledResumeAtMs: now + 1000, kind: 'backoff', runId: 'r1' });
   recordWatchdogPause(state, 'agent-cto', {
     pausedAtMs: now + 11 * 3_600_000,
     scheduledResumeAtMs: now + 30 * 86_400_000,
-    kind: 'quota',
+    kind: 'backoff',
     runId: 'r2',
   });
   const entry = getWatchdogPause(state, 'agent-cto');
@@ -440,4 +440,28 @@ test('a NEW pause on an agent that was running restarts the ceiling clock, so a 
   });
   assert.equal(getWatchdogPause(state, 'agent-cto').pausedAtMs, now);
   assert.deepEqual(overduePauses(state, now + 1000, SWEEP), [], 'the fresh pause must be allowed to run its course');
+});
+
+// Review finding on PR #14: a quota reset is not bounded by 12h. A weekly
+// limit resets days out, and even a daily reset that rolled over to tomorrow
+// can be ~24h away. With the 12h ceiling applied to those, the agent is
+// force-resumed, fails on the same limit, and is re-paused every 12h.
+test('a quota pause with a valid multi-day schedule (weekly limit) is NOT force-resumed by the 12h ceiling', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now, scheduledResumeAtMs: now + 5 * 86_400_000, kind: 'quota', runId: 'r1' });
+  assert.deepEqual(overduePauses(state, now + 13 * 3_600_000, SWEEP), [], '13h into a 5-day weekly wait');
+  assert.deepEqual(overduePauses(state, now + 4 * 86_400_000, SWEEP), [], '4 days into a 5-day weekly wait');
+  // ...and the ordinary overdue rule still gets it out once the reset has passed.
+  assert.equal(overduePauses(state, now + 5 * 86_400_000 + 11 * 60_000, SWEEP).length, 1);
+});
+
+test('a quota pause still has an absolute bound: the longer quota ceiling catches a schedule mangled weeks out', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now, scheduledResumeAtMs: now + 30 * 86_400_000, kind: 'quota', runId: 'r1' });
+  assert.deepEqual(overduePauses(state, now + 7 * 86_400_000, SWEEP), []);
+  const swept = overduePauses(state, now + 9 * 86_400_000, SWEEP);
+  assert.equal(swept.length, 1);
+  assert.match(swept[0][2], /maximum-pause ceiling/);
 });

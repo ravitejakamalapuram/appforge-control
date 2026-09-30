@@ -131,12 +131,17 @@ const DEFAULT_LOOKBACK_MINUTES = 180;
 // past it is parked because something broke, not because it is early.
 const OVERDUE_RESUME_MARGIN_MS = 10 * 60_000;
 
-// Absolute ceiling on how long this watchdog will leave any agent parked,
-// independent of what its schedule claims. Claude session limits reset well
-// inside 5 hours, so 12h cannot cut short a legitimate quota wait -- it only
-// fires when the schedule itself is wrong (unparseable reset text, corrupted
-// state, a clock jump).
+// Absolute ceiling on how long this watchdog will leave an agent parked,
+// independent of what its schedule claims. It only fires when the schedule
+// itself is wrong (corrupted state, a clock jump, a mangled parse).
+//
+// Backoff pauses are capped at BACKOFF_CAP_MS (30min), so 12h is far outside
+// anything legitimate. Quota pauses are not: a weekly limit resets days out,
+// and a daily reset that rolled over can be ~24h away, so they get 8 days --
+// the longest real reset (a week) plus a day of slack. A 12h ceiling there
+// force-resumes the agent into the same limit every 12h (PR #14 review).
 const MAX_PAUSE_MS = 12 * 3_600_000;
+const MAX_QUOTA_PAUSE_MS = 8 * 86_400_000;
 
 // How long a handled-run-id stays in the state file. Must comfortably
 // exceed DEFAULT_LOOKBACK_MINUTES so a run never "ages out" of the handled
@@ -586,6 +591,7 @@ export async function runOnce(args, { log, recordError = () => {} }) {
   for (const [agentId, entry, why] of overduePauses(state, nowMs, {
     overdueMarginMs: OVERDUE_RESUME_MARGIN_MS,
     maxPauseMs: MAX_PAUSE_MS,
+    maxQuotaPauseMs: MAX_QUOTA_PAUSE_MS,
   })) {
     const name = agentName(agentId);
     const known = agentById[agentId];

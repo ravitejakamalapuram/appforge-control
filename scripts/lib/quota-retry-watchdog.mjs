@@ -421,9 +421,17 @@ function usableTimestamp(value) {
  *    a single bad parse could park an agent for days and the first ceiling
  *    would never trigger, because it trusts the very number that is wrong.
  *
+ *    `kind: 'quota'` entries get their own, much longer `maxQuotaPauseMs`.
+ *    A provider reset is not bounded by 12h: a weekly limit resets days out,
+ *    and a daily reset that rolled over to tomorrow can be ~24h away. Holding
+ *    those to `maxPauseMs` force-resumes the agent into the same limit, it
+ *    fails, and the next pass re-pauses it -- every 12h until the real reset.
+ *    Defaults to `maxPauseMs` so a caller that does not know about the split
+ *    keeps the old single-ceiling behaviour.
+ *
  * Both are evaluated against `nowMs`; either one firing is enough.
  */
-export function overduePauses(state, nowMs, { overdueMarginMs, maxPauseMs }) {
+export function overduePauses(state, nowMs, { overdueMarginMs, maxPauseMs, maxQuotaPauseMs = maxPauseMs }) {
   const out = [];
   for (const [agentId, entry] of Object.entries(state.pausedAgents || {})) {
     const scheduled = usableTimestamp(entry.scheduledResumeAtMs);
@@ -436,7 +444,8 @@ export function overduePauses(state, nowMs, { overdueMarginMs, maxPauseMs }) {
       out.push([agentId, entry, 'pause entry has no usable scheduled resume time']);
       continue;
     }
-    if (Number.isFinite(pausedAt) && nowMs - pausedAt > maxPauseMs) {
+    const ceilingMs = entry.kind === 'quota' ? maxQuotaPauseMs : maxPauseMs;
+    if (Number.isFinite(pausedAt) && nowMs - pausedAt > ceilingMs) {
       out.push([agentId, entry, `paused for ${Math.round((nowMs - pausedAt) / 3_600_000)}h, past the maximum-pause ceiling`]);
     }
   }
