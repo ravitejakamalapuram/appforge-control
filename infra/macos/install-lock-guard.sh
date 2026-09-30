@@ -111,7 +111,14 @@ fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8") as f:
     f.write(text)
 PY
-plutil -lint "$tmp" >/dev/null || die "rendered plist failed plutil -lint"
+# plutil is macOS-only and this script's tests also run on Linux CI, so fall back to
+# Python's plistlib, which parses the same XML plist format (same pattern as install-plists.sh).
+if command -v plutil >/dev/null 2>&1; then
+  plutil -lint "$tmp" >/dev/null || die "rendered plist failed plutil -lint"
+else
+  python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$tmp" >/dev/null 2>&1 \
+    || die "rendered plist failed to parse as a property list"
+fi
 install -m 0600 "$tmp" "$PLIST_DST"
 chmod 600 "$PLIST_DST"
 

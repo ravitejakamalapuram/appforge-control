@@ -35,8 +35,17 @@ function install(h, args = [], extraEnv = {}) {
 }
 
 const mode = (p) => (statSync(p).mode & 0o777).toString(8);
+// plutil is macOS-only and this suite also runs on Linux CI, so parse plists with Python's
+// plistlib (present on both). plistGet takes a dotted keypath; numeric parts index arrays.
+const py = (code, ...args) => execFileSync('python3', ['-c', code, ...args], { encoding: 'utf8' }).trim();
+const plistLint = (file) => py('import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))', file);
 const plistGet = (file, key) =>
-  execFileSync('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', file], { encoding: 'utf8' }).trim();
+  py(
+    'import plistlib,sys\nd=plistlib.load(open(sys.argv[1],"rb"))\n' +
+      'for part in sys.argv[2].split("."):\n  d = d[int(part)] if isinstance(d, list) else d[part]\nprint(d)',
+    file,
+    key,
+  );
 
 test('deploys the guard to ~/.appforge-ops/bin (0555, identical to the repo copy) by default', () => {
   const h = makeHome();
@@ -107,7 +116,7 @@ test('renders the plist: topic filled from .envrc, 0600, valid, no placeholder, 
     const out = path.join(h.dest, 'ing.paperclip.appforge-lock-guard.plist');
     assert.ok(existsSync(out));
     assert.equal(mode(out), '600');
-    execFileSync('/usr/bin/plutil', ['-lint', out]);
+    plistLint(out);
     const text = readFileSync(out, 'utf8');
     assert.ok(!text.includes('__NTFY_TOPIC__'), 'placeholder must be substituted');
     assert.ok(text.includes(TOPIC), 'topic from .envrc should be in the rendered plist');
@@ -143,7 +152,7 @@ test('re-running over an existing read-only (0555) deployment succeeds and re-lo
 
 test('the COMMITTED plist agrees with the installer: runs ~/.appforge-ops/bin/…, never ~/.appforge/…', () => {
   const text = readFileSync(PLIST, 'utf8');
-  execFileSync('/usr/bin/plutil', ['-lint', PLIST]);
+  plistLint(PLIST);
   const script = plistGet(PLIST, 'ProgramArguments.1');
   assert.ok(script.endsWith(`/.appforge-ops/bin/${NAME}`), script);
   assert.doesNotMatch(text, /\/\.appforge\//, 'no reference to the CTO-owned ~/.appforge tree');
