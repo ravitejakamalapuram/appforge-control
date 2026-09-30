@@ -507,7 +507,7 @@ test('bounded pause: an agent parked by the watchdog with its pending resume LOS
   assert.equal(Object.keys(finalState.pendingActions).length, 0, 'there was never a pending action to fire');
   assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP force-resuming agent=CTO')), 'the sweep must catch it');
   assert.ok(logs.some((l) => l.includes('DRY-RUN would run: paperclipai agent resume agent-cto')));
-  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP woke agent=CTO')), 'and wake it, so it does not sit idle until its next heartbeat');
+  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP WAKE agent=CTO')), 'and wake it, so it does not sit idle until its next heartbeat');
   assert.equal(finalState.pausedAgents['agent-cto'], undefined, 'the claim is released once the resume lands');
 });
 
@@ -673,3 +673,73 @@ test('a normal due-fire clears the pause claim, so the sweep has nothing left to
   assert.equal(finalState.pendingActions['agent-cto'], undefined);
 });
 
+
+// ---------------------------------------------------------------------------
+// APP-103 x APP-181: the force-resume sweep must not regress the task binding.
+// The sweep exists for the case where the pending action was LOST, so the
+// issue it binds the wake to has to come from the pause registry itself.
+// ---------------------------------------------------------------------------
+
+test('APP-181 x APP-103: a quota pause records the interrupted run\'s issue on the pause registry entry', async () => {
+  const nowMs = Date.now();
+  const failedAtIso = new Date(nowMs).toISOString();
+  const issueId = 'b1b2b3b4-1111-4222-8333-444455556666';
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', [{
+        id: 'run-bound', agentId: 'agent-cto', status: 'failed', errorCode: 'provider_quota',
+        error: formatResetText(nowMs + 2 * 3_600_000), createdAt: failedAtIso, startedAt: failedAtIso,
+        finishedAt: failedAtIso, contextSnapshot: { issueId },
+      }]],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile: tmpStateFile() }, { log: () => {} }),
+  );
+  assert.equal(finalState.pausedAgents['agent-cto'].issueId, issueId);
+});
+
+test('APP-181 x APP-103: the force-resume wake is task-bound and carries the collateral note', async () => {
+  const nowMs = Date.now();
+  const issueId = 'c1c2c3c4-1111-4222-8333-444455556666';
+  const stateFile = await seedState((state) => {
+    // Pending action lost; only the registry entry survives.
+    state.pausedAgents['agent-cto'] = {
+      pausedAtMs: nowMs - 3 * 3_600_000,
+      scheduledResumeAtMs: nowMs - 40 * 60_000,
+      kind: 'quota',
+      runId: 'run-lost',
+      issueId,
+    };
+  });
+  const logs = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const payload = url.includes('/heartbeat-runs')
+      ? []
+      : url.includes('/agents')
+        ? [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]
+        : {
+            issues: [{
+              id: 'i-2', identifier: 'APP-998', title: 'collateral', status: 'blocked', assigneeAgentId: 'agent-cto',
+              activeRecoveryAction: {
+                id: 'act-2', status: 'active', cause: 'stranded_assigned_issue', returnOwnerAgentId: 'agent-cto',
+                createdAt: new Date(nowMs).toISOString(),
+                evidence: { latestRunId: 'run-dead', latestRunStatus: 'cancelled', latestRunErrorCode: 'agent_paused' },
+              },
+            }],
+          };
+    return { ok: true, status: 200, json: async () => payload, text: async () => '' };
+  };
+  let finalState;
+  try {
+    finalState = await runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const wake = logs.find((l) => l.includes('DRY-RUN would run: paperclipai agent wake agent-cto'));
+  assert.ok(wake, 'the sweep must wake the agent');
+  assert.ok(wake.includes(`--payload {"issueId":"${issueId}"}`), `force-resume wake must stay task-bound: ${wake}`);
+  assert.match(wake, /APP-998/, 'and name the pause collateral, same as the due-fire path');
+  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP WAKE agent=CTO') && l.includes(`issue=${issueId}`)));
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined);
+});
