@@ -1,0 +1,7 @@
+{
+  "dimensionHeaders": [{ "name": "date" }, { "name": "eventName" }],
+  "metricHeaders": [{ "name": "eventCount", "type": "TYPE_INTEGER" }],
+  "rowCount": 0,
+  "metadata": { "currencyCode": "USD", "timeZone": "America/Los_Angeles" },
+  "kind": "analyticsData#runReport"
+}
