@@ -139,10 +139,20 @@ whether the run is bound to an **issue** — and it decides different things:
 The consequence is the APP-224 defect: **a task-unbound run can take an issue's
 checkout lock it can never write to.** `POST /api/issues/{id}/checkout` returns
 200 and sets `in_progress`; every subsequent `PATCH` and comment on that issue
-403s. Meanwhile the assigned agent's own task-bound run gets `409
-issue_write_assignee_run_lock` on both `PATCH /api/issues/{id}` and
-`POST /checkout` — so for the life of the unbound run, the one status write the
-issue needs can be issued by nobody.
+403s. The lock is useless to the only run holding it.
+
+**It does not follow that nobody can write.** An earlier revision of this
+section claimed the assignee's own task-bound run is also locked out with `409
+issue_write_assignee_run_lock`, making the needed status write unissuable by
+anyone. That is wrong, and the source says so — see the anchors below. The 409
+branch is keyed on **assignee mismatch**, so a run of the assignee agent never
+takes it. On APP-217 both the unbound holder and the later bound run were the
+same agent, which is precisely how APP-217 closed itself while still locked.
+
+What the unbound checkout does cost other actors is narrower: it sets
+`in_progress`, which arms that assignee-mismatch 409 against every *non*-assignee
+agent without a checkout-management override, for the unbound run's lifetime. So the grant buys its holder nothing and
+costs third parties a write window they would otherwise have had.
 
 ### The discriminator is `contextSnapshot.taskId`, not `invocationSource`
 
@@ -163,7 +173,7 @@ issue needs can be issued by nobody.
 | `47c79a69` | automation | absent (**unbound**) | 00:03:42 → 00:17:26 | could not write; wrote its verdict to an issue *document* instead |
 | `e3b51905` | automation | `b126c0ef…` = **APP-217** | 00:17:27 → 00:23:55 | **closed APP-217** at 00:22:58 |
 
-Two corrections to how this first looked from inside the 409:
+Three corrections to how this first looked from inside the 409:
 
 1. **It is a bounded starvation window, not a permanent livelock.** The lock was
    not passed hand-to-hand between unbound runs. Only the *first* holder was
@@ -174,11 +184,45 @@ Two corrections to how this first looked from inside the 409:
    defect.** `issue_write_assignee_run_lock` is the documented, correct answer
    when another run legitimately holds the checkout. Confirm the holder's binding
    before calling it starvation.
+3. **No retry dropped a binding.** APP-224 read this as a continuation retry
+   losing a binding its predecessor had, and [APP-229](/APP/issues/APP-229) was
+   opened to report that. The run records refute it. `a520f601`'s own
+   `contextSnapshot` has no `taskId` and no `issueId` either: its wake was a
+   board-triggered watchdog quota-resume (`triggeredBy: "board"`, `actorId:
+   "local-board"`, `wakeReason: "resuming after provider_quota reset
+   (watchdog)…"`), which is **agent-scoped, not issue-scoped**, and so is unbound
+   by design. `47c79a69` (`retryOfRunId: a520f601`, `retryReason:
+   "max_turns_continuation"`) faithfully inherited that unbound state. Nothing was
+   lost. The two snapshot shapes are disjoint: a bound run carries `taskId`,
+   `issueId`, `taskKey`, `source`, `paperclipIssue`, `paperclipTaskMarkdown`,
+   `paperclipHarnessCheckedOut`; these two carried none of them, and instead
+   carried `actorId`, `triggeredBy`, `originIdentityContextId`,
+   `forceFreshSession`.
 
-The generative mechanism worth reporting upstream is narrower than "unbound runs
-exist": `47c79a69` was a `max_turns_continuation` retry of `a520f601`, and the
-retry was dispatched with **no task binding at all**. A retry that drops the
-binding and then takes checkouts is the thing to fix.
+So "preserve task binding across retries" has no defect behind it on this
+evidence. The retry was bound exactly like the run it retried. The thing to fix
+is that an agent-scoped run can take an issue lock at all.
+
+### Where this lives in the server, and why the denial is a category error
+
+Anchored in the installed dist, `@paperclipai/server@2026.916.1` — read
+`node_modules/@paperclipai/server/dist/`:
+
+| Site | What it does |
+|---|---|
+| `routes/issues.js:10660` — `POST /issues/:id/checkout` | Requires a **run** (`requireAgentRunId`, `:10691`). Never calls `assertCrossIssueInfluenceWithinRunCap`. Task binding is not consulted. |
+| `routes/issues.js:2454` — `assertCrossIssueInfluenceWithinRunCap` | The guard that *does* consult it. Applied to update (`:6260`, `:9124`), comment (`:9127`, `:12476`), interaction resolution (`:3698`) — **not** checkout. |
+| `services/cross-issue-influence-limit.js:69-71` | `readRunSourceIssueId(run.contextSnapshot)` reads `issueId ?? taskId`; null ⇒ `throw crossIssueInfluenceRunContextError()`. This is the 403. |
+| `services/cross-issue-influence-limit.js:72-75` | Same-issue writes are **exempt** — `return null`, allowed and uncounted. |
+| `routes/issues.js:3438-3449` | The `409 issue_write_assignee_run_lock` branch: `issue.assigneeAgentId !== actorAgentId && issue.status === "in_progress"`, unless the actor holds a checkout-management override (`:3439`). Assignee mismatch, not lock holder. |
+
+The 403 is a category error. The function's entire job is counting **cross**-issue
+writes, and three lines below the branch that denies, a same-issue write is
+exempted outright. An unbound run writing to the issue it holds the checkout on
+*is* a same-issue write — but it is refused before the exemption can be reached,
+because the run's snapshot does not name the issue that the `issues` table
+already records it as holding. The information needed to allow the write is
+present in the same transaction, which already locks the run row.
 
 ### What to do about it
 
@@ -195,10 +239,16 @@ binding and then takes checkouts is the thing to fix.
   lock held by a live-but-unbound run as `live_unbound_holder` once it is older
   than `--unbound-grace-minutes` (default 15m). It remains detection-only, per
   the CEO ruling on APP-91.
-- **Upstream ask**, in preference order: (1) refuse `POST /checkout` on a
-  task-unbound run — the lock buys that run nothing; (2) preserve task binding
-  across continuation and watchdog-resume retries so the retry is bound like its
-  predecessor.
+- **Do not file this upstream. It is already fixed in flight, and our preferred
+  ask was the wrong one.** [APP-79](/APP/issues/APP-79) maps this exact defect to
+  open upstream PRs — `#14259`/`#14229` stamp `issueId` into the run
+  `contextSnapshot` on checkout, `#13833`/`#13650` bind run context to the
+  checked-out issue, `#14344` lets a run write the issue it holds, `#13899`
+  splits the diagnostic for runs with no source issue. Binding **at** checkout is
+  strictly better than refusing the checkout, which is what we wanted to ask for:
+  an agent-scoped resume wake is unbound by design, so refusing its checkout
+  would leave it unable to do any issue work at all. Track the release on
+  [APP-79](/APP/issues/APP-79); do not press ours. Ruling: APP-229.
 
 ## Is it intermittent?
 
