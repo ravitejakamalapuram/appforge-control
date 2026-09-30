@@ -35,6 +35,13 @@
 //   node scripts/detect-launcher-drift.mjs
 //   node scripts/detect-launcher-drift.mjs --json
 //   node scripts/detect-launcher-drift.mjs --install-dir /tmp/fixture --no-fetch
+//   node scripts/detect-launcher-drift.mjs --diff-lines 40
+//
+// Each `stale` finding carries the install-commit..ref-tip diff for its source
+// path, bounded to --diff-lines, and a behavioural-vs-comment-only verdict that
+// decides whether it escalates or lands as a note (APP-261). See
+// lib/launcher-diff-classify.mjs for why that verdict always fails toward
+// `high`, and why it can never suppress a finding.
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -49,20 +56,31 @@ import {
   renderReport,
   sha256,
 } from './lib/launcher-drift.mjs';
+import { DEFAULT_DIFF_LINE_LIMIT } from './lib/launcher-diff-classify.mjs';
 
 const run = promisify(execFile);
 
 function parseArgs(argv) {
-  const args = { json: false, fetch: true, installDir: path.join(homedir(), '.appforge'), sourceRepo: null };
+  const args = {
+    json: false,
+    fetch: true,
+    installDir: path.join(homedir(), '.appforge'),
+    sourceRepo: null,
+    diffLineLimit: DEFAULT_DIFF_LINE_LIMIT,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--json') args.json = true;
     else if (arg === '--no-fetch') args.fetch = false;
     else if (arg === '--install-dir') args.installDir = argv[++i];
     else if (arg === '--source-repo') args.sourceRepo = argv[++i];
+    else if (arg === '--diff-lines') args.diffLineLimit = Number(argv[++i]);
     else throw new Error(`unknown argument: ${arg}`);
   }
   if (!args.installDir) throw new Error('--install-dir requires a path');
+  if (!Number.isInteger(args.diffLineLimit) || args.diffLineLimit < 1) {
+    throw new Error('--diff-lines requires a positive integer');
+  }
   return args;
 }
 
@@ -114,6 +132,45 @@ async function digestAtCommit(repo, commit, relPath) {
       maxBuffer: 32 * 1024 * 1024,
     });
     return sha256(stdout);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Blob content at a commit as a UTF-8 string, or null when it is not there.
+ *
+ * Read as a buffer and decoded here rather than letting `execFile` decode, so a
+ * file that is not valid UTF-8 comes back with replacement characters that the
+ * classifier's binary check can see rather than silently succeeding.
+ */
+async function textAtCommit(repo, commit, relPath) {
+  try {
+    const { stdout } = await run('git', ['-C', repo, 'cat-file', 'blob', `${commit}:${relPath}`], {
+      encoding: 'buffer',
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    if (stdout.includes(0)) return null;
+    return stdout.toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `git diff <a>..<b> -- <path>` for one path, or null when git refuses.
+ *
+ * Read-only history plumbing, like every other git call here: no index read, no
+ * working-tree read, so it is safe against the shared checkout whatever branch
+ * another agent has left it on. A null return leaves the finding at `high`,
+ * which is the correct failure direction (APP-261).
+ */
+async function diffBetween(repo, from, to, relPath, contextLines) {
+  try {
+    const { stdout } = await run('git', [
+      '-C', repo, 'diff', `--unified=${contextLines}`, '--no-color', `${from}..${to}`, '--', relPath,
+    ], { maxBuffer: 32 * 1024 * 1024 });
+    return stdout === '' ? null : stdout;
   } catch {
     return null;
   }
@@ -172,6 +229,23 @@ async function main() {
     refTipDigests[entry.sourcePath] = await digestAtCommit(sourceRepo, refTipCommit, entry.sourcePath);
   }
 
+  // A path is stale exactly when its blob moved between the install commit and
+  // the ref tip, which is computable here — so the diff is fetched only for the
+  // handful of paths that will actually carry one, not for all 11 files.
+  const sourceDiffs = {};
+  for (const entry of manifest.files) {
+    if (!entry.versioned || !entry.sourcePath) continue;
+    const atCommit = commitDigests[entry.sourcePath] ?? null;
+    const atTip = refTipDigests[entry.sourcePath] ?? null;
+    if (atCommit === null || atTip === null || atCommit === atTip) continue;
+    if (sourceDiffs[entry.sourcePath]) continue;
+    sourceDiffs[entry.sourcePath] = {
+      diffText: await diffBetween(sourceRepo, manifest.sourceCommit, refTipCommit, entry.sourcePath, 3),
+      beforeText: await textAtCommit(sourceRepo, manifest.sourceCommit, entry.sourcePath),
+      afterText: await textAtCommit(sourceRepo, refTipCommit, entry.sourcePath),
+    };
+  }
+
   const report = buildReport({
     manifest,
     installDigests,
@@ -179,6 +253,8 @@ async function main() {
     commitDigests,
     refTipCommit,
     refTipDigests,
+    sourceDiffs,
+    diffLineLimit: args.diffLineLimit,
     installDir: args.installDir,
   });
 

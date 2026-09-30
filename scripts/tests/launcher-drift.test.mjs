@@ -3,12 +3,21 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
   FALLBACK_SOURCE_PATHS,
+  LAUNCH_PATH_INSTALL_PATHS,
+  blastRadiusFor,
   buildReport,
   isUnversionedPath,
   parseReleaseManifest,
   renderProvenance,
   renderReport,
 } from '../lib/launcher-drift.mjs';
+import {
+  boundDiff,
+  classifyStaleChange,
+  commentFamilyFor,
+  parseUnifiedDiff,
+  scanSource,
+} from '../lib/launcher-diff-classify.mjs';
 
 const DIGEST = (seed) => seed.repeat(64).slice(0, 64);
 const INSTALLED = DIGEST('a');
@@ -247,4 +256,358 @@ test('agent-launch.sh does not invoke the drift check', async () => {
   const launcher = await readFile(new URL('../agent-launch.sh', import.meta.url), 'utf8');
   assert.ok(!launcher.includes('detect-launcher-drift'),
     'wiring the drift check into launch would make one bad check kill every agent run (APP-132)');
+});
+
+// ---------------------------------------------------------------------------
+// APP-261 — the report carries the diff, and classifies behavioural vs not.
+//
+// The defect these cover: any content change to a versioned launcher file was
+// `stale`/`high` and went to the CEO with blob hashes and no diff. It escalated
+// a 5-line advice string (APP-226) and a comment-only `config/github-apps.yaml`
+// edit (APP-260). An operator who sees documentation escalated as `high` learns
+// to discount the check, which is how the APP-72 blind spot returns.
+// ---------------------------------------------------------------------------
+
+/** A real unified diff for `before` -> `after`, built without touching a repo. */
+function unifiedDiff(sourcePath, before, after) {
+  const a = before.split('\n');
+  const b = after.split('\n');
+  return [
+    `diff --git a/${sourcePath} b/${sourcePath}`,
+    'index 1111111..2222222 100644',
+    `--- a/${sourcePath}`,
+    `+++ b/${sourcePath}`,
+    `@@ -1,${a.length} +1,${b.length} @@`,
+    ...a.map((l) => `-${l}`),
+    ...b.map((l) => `+${l}`),
+  ].join('\n');
+}
+
+/** A world where `scripts/agent-launch.sh` is stale with the given delta. */
+function staleWorld(sourcePath, before, after, over = {}) {
+  const text = MANIFEST_TEXT.replace(
+    `${INSTALLED}  bin/agent-launch.sh  versioned`,
+    `${INSTALLED}  bin/agent-launch.sh  versioned  ${sourcePath}`);
+  const world = cleanWorld({ manifest: parseReleaseManifest(text), refTipCommit: TIP, ...over });
+  world.refTipDigests[sourcePath] = MERGED;
+  world.sourceDiffs = {
+    [sourcePath]: {
+      diffText: unifiedDiff(sourcePath, before, after),
+      beforeText: before,
+      afterText: after,
+    },
+    ...(over.sourceDiffs ?? {}),
+  };
+  return world;
+}
+
+const onlyFinding = (world) => {
+  const report = buildReport(world);
+  assert.equal(report.findings.length, 1, `expected exactly one finding, got ${JSON.stringify(report.findings.map((f) => f.kind))}`);
+  return { report, f: report.findings[0] };
+};
+
+// Acceptance criterion 1.
+test('a stale finding carries the diff hunks so severity is judgeable in place', () => {
+  const { f } = onlyFinding(staleWorld('scripts/x.mjs', 'if (a) run();\n', 'if (a || b) run();\n'));
+  assert.equal(f.kind, 'stale');
+  assert.ok(f.diff, 'the whole point of APP-261 is that the diff is in the report');
+  assert.match(f.diff.text, /\+if \(a \|\| b\) run\(\);/);
+  assert.equal(f.diff.truncated, false);
+  assert.match(renderReport(buildReport(staleWorld('scripts/x.mjs', 'if (a) run();\n', 'if (a || b) run();\n'))),
+    /```diff[\s\S]*\+if \(a \|\| b\)/);
+});
+
+// Acceptance criterion 4, case 1: a comment-only change is `low`.
+test('a comment-only change is low and routes as a note, not a CEO escalation', () => {
+  const before = '// old note\nconst a = 1;\n';
+  const after = '/*\n * new note, several lines\n * of it\n */\nconst a = 1;\n';
+  const { report, f } = onlyFinding(staleWorld('scripts/x.mjs', before, after));
+  assert.equal(f.severity, 'low');
+  assert.equal(f.classification.verdict, 'comment_only');
+  assert.equal(report.shouldEscalate, false, 'a documentation edit must not consume a CEO ruling');
+  assert.match(renderReport(report), /Routing: note only/);
+  assert.match(renderReport(report), /never drops a finding/);
+});
+
+// The measured APP-260 case, as a regression fixture rather than a paraphrase:
+// the real `config/github-apps.yaml` delta was comment-only with a provably
+// zero effective change, and the detector rated it `high` with escalate=true.
+test('the APP-260 github-apps.yaml shape classifies comment_only', () => {
+  const before = [
+    'apps:',
+    '  appforge-agents:',
+    '    deliberately_excluded:',
+    '      - release-platform # separate App',
+    '      - InvTrack # hands-off per founder policy',
+    '',
+  ].join('\n');
+  const after = [
+    'apps:',
+    '  appforge-agents:',
+    '    # CAUTION (APP-251): this list is NOT symmetric with `installed_on`.',
+    '    # release-platform is enforced SERVER-SIDE by GitHub.',
+    '    # InvTrack is a client-side pre-check; do not read it as containment.',
+    '    deliberately_excluded:',
+    '      - release-platform # separate App',
+    '      - InvTrack # hands-off per founder policy',
+    '',
+  ].join('\n');
+  const c = classifyStaleChange({
+    sourcePath: 'config/github-apps.yaml', beforeText: before, afterText: after,
+    diffText: unifiedDiff('config/github-apps.yaml', before, after),
+  });
+  assert.equal(c.verdict, 'comment_only');
+  assert.equal(c.severity, 'low');
+});
+
+// Acceptance criterion 4, case 2: a logic change stays `high`.
+test('a logic change stays high and still escalates', () => {
+  const { report, f } = onlyFinding(staleWorld('scripts/x.mjs',
+    '// note\nif (allowed) mint();\n',
+    '// note\nif (allowed || override) mint();\n'));
+  assert.equal(f.severity, 'high');
+  assert.equal(f.classification.verdict, 'behavioural');
+  assert.equal(report.shouldEscalate, true, 'a merged-but-inert code change is the APP-72 failure class');
+});
+
+test('a change mixing comments and code is behavioural, never comment_only', () => {
+  const { f } = onlyFinding(staleWorld('scripts/x.mjs',
+    'const a = 1;\n',
+    '// explaining the change\nconst a = 2;\n'));
+  assert.equal(f.severity, 'high');
+  assert.equal(f.classification.verdict, 'behavioural');
+});
+
+// Acceptance criterion 4, case 3: an unparseable diff is `high`.
+test('an unparseable diff fails toward high rather than toward clean', () => {
+  const world = staleWorld('scripts/x.mjs', '// a\nconst a = 1;\n', '// b\nconst a = 1;\n');
+  world.sourceDiffs['scripts/x.mjs'].diffText = 'this is not a unified diff at all';
+  const { report, f } = onlyFinding(world);
+  assert.equal(f.severity, 'high', 'a classifier that cannot read the diff must not grant low');
+  assert.equal(f.classification.verdict, 'unparseable');
+  assert.equal(report.shouldEscalate, true);
+});
+
+test('a file type with no known comment grammar fails toward high', () => {
+  const { f } = onlyFinding(staleWorld('scripts/x.conf', 'a=1\n', 'a=2\n'));
+  assert.equal(f.severity, 'high');
+  assert.equal(f.classification.verdict, 'unparseable');
+  assert.equal(commentFamilyFor('scripts/x.conf'), null);
+});
+
+test('a stale finding with no diff supplied at all stays high', () => {
+  // The CLI can fail to produce a diff — a shallow clone, a gc'd object, git
+  // refusing for any reason. Absence of evidence must not lower severity.
+  const world = staleWorld('scripts/x.mjs', '// a\n', '// b\n');
+  world.sourceDiffs = {};
+  const { f } = onlyFinding(world);
+  assert.equal(f.severity, 'high');
+  assert.equal(f.classification.verdict, 'unparseable');
+  assert.equal(f.diff, null);
+});
+
+test('a binary blob is not classified as comment-only', () => {
+  const c = classifyStaleChange({
+    sourcePath: 'scripts/x.mjs', beforeText: 'a\u0000b', afterText: 'a\u0000c',
+    diffText: 'diff --git a/x b/x\nBinary files a/x and b/x differ',
+  });
+  assert.equal(c.verdict, 'unparseable');
+  assert.equal(c.severity, 'high');
+});
+
+// Acceptance criterion 4, case 4: `critical` is untouched by the classifier.
+test('a tampered finding stays critical even when the merged delta is comment-only', () => {
+  // The two facts are independent. `tampered` says the live file was edited
+  // after deploy; the delta between two commits says nothing about that edit.
+  // An unexplained hand-edit to the credential-bearing launcher tree is
+  // critical for being unexplained.
+  const world = staleWorld('scripts/agent-launch.sh', '# old note\nexec "$@"\n', '# new note\nexec "$@"\n');
+  world.installDigests['bin/agent-launch.sh'] = EDITED;
+
+  const report = buildReport(world);
+  const tampered = report.findings.find((f) => f.kind === 'tampered');
+  assert.ok(tampered, 'the classifier must never suppress a finding');
+  assert.equal(tampered.severity, 'critical');
+  assert.equal(tampered.classification, undefined, 'critical kinds are not classified at all');
+  assert.equal(report.worstSeverity, 'critical');
+  assert.equal(report.shouldEscalate, true);
+
+  const stale = report.findings.find((f) => f.kind === 'stale');
+  assert.equal(stale.severity, 'low', 'the stale half may still be low; that does not soften the tampered half');
+});
+
+test('missing and manifest_mismatch are likewise never classified', () => {
+  for (const [label, mutate] of [
+    ['missing', (w) => { w.installDigests['bin/agent-launch.sh'] = null; }],
+    ['manifest_mismatch', (w) => { w.manifest.files[0].sha256 = EDITED; w.installDigests['bin/agent-launch.sh'] = EDITED; }],
+  ]) {
+    const world = staleWorld('scripts/agent-launch.sh', '# old\n', '# new\n');
+    mutate(world);
+    const found = buildReport(world).findings.find((f) => f.kind === label);
+    assert.ok(found, `${label} must still be reported`);
+    assert.equal(found.severity, 'critical');
+    assert.equal(found.classification, undefined);
+  }
+});
+
+test('string-literal-only changes keep high by default, labelled so the reader sees why', () => {
+  // APP-261's text groups string literals with comments. It is narrowed here on
+  // purpose: the repo allowlists and `deliberately_excluded` entries that keep
+  // agents off release-platform and InvTrack are string data, so a
+  // strings-are-free rule would route a containment change as a note. The
+  // verdict is surfaced instead, which is what APP-226 actually cost.
+  const { f } = onlyFinding(staleWorld('scripts/x.mjs',
+    "const advice = 'run --resolve here';\nwake(advice);\n",
+    "const advice = 'this wake is unbound; run it report-only';\nwake(advice);\n"));
+  assert.equal(f.classification.verdict, 'strings_only');
+  assert.equal(f.severity, 'high');
+
+  const opted = classifyStaleChange({
+    sourcePath: 'scripts/x.mjs',
+    beforeText: "const a = 'x';\n", afterText: "const a = 'yy';\n",
+    diffText: unifiedDiff('scripts/x.mjs', "const a = 'x';\n", "const a = 'yy';\n"),
+    treatStringsAsNonBehavioural: true,
+  });
+  assert.equal(opted.verdict, 'strings_only');
+  assert.equal(opted.severity, 'low', 'the looser rule is available, but nothing in this repo opts into it');
+});
+
+test('a comment-looking line added inside a template literal is behavioural', () => {
+  // The line-prefix test alone would pass this: the added line starts with
+  // `//`. The whole-file strip-and-compare is what catches it, which is why the
+  // verdict needs both checks and not either one.
+  const before = 'const s = `\nkept\n`;\n';
+  const after = 'const s = `\n// not a comment\nkept\n`;\n';
+  const c = classifyStaleChange({
+    sourcePath: 'scripts/x.mjs', beforeText: before, afterText: after,
+    diffText: unifiedDiff('scripts/x.mjs', before, after),
+  });
+  assert.equal(c.verdict, 'behavioural');
+  assert.equal(c.severity, 'high');
+});
+
+test('a `//` inside a string is not mistaken for a comment', () => {
+  // Naive `s|//.*||` stripping would cut both revisions to `fetch('https:` and
+  // call a changed host comment-only. That is a false low on a URL.
+  const before = "fetch('https://a.example/mint');\n";
+  const after = "fetch('https://b.example/mint');\n";
+  assert.notEqual(scanSource(before, 'c_like').code, scanSource(after, 'c_like').code);
+  const c = classifyStaleChange({
+    sourcePath: 'scripts/x.mjs', beforeText: before, afterText: after,
+    diffText: unifiedDiff('scripts/x.mjs', before, after),
+  });
+  assert.notEqual(c.severity, 'low');
+});
+
+test('a `#` inside a quoted shell or YAML scalar is not a comment', () => {
+  assert.equal(scanSource("k: 'a#b'\n", 'hash').code, "k: 'a#b'");
+  assert.equal(scanSource('k: v # trailing\n', 'hash').code, 'k: v');
+  assert.equal(scanSource('echo "${x#prefix}"\n', 'hash').code, 'echo "${x#prefix}"');
+});
+
+test('a whitespace-only or reindent change is low', () => {
+  const { f } = onlyFinding(staleWorld('scripts/x.mjs', 'const a = 1;\n', '  const a = 1;   \n\n'));
+  assert.equal(f.severity, 'low');
+  assert.equal(f.classification.verdict, 'comment_only');
+});
+
+test('JSON has no comment syntax, so any change to it is behavioural', () => {
+  const { f } = onlyFinding(staleWorld('scripts/package-lock.json', '{"a":1}\n', '{"a":2}\n'));
+  assert.equal(f.severity, 'high');
+  assert.equal(f.classification.family, 'none');
+});
+
+test('strict diff parsing rejects hunks whose body disagrees with their header', () => {
+  assert.throws(() => parseUnifiedDiff('@@ -1,1 +1,1 @@\n-a\n-b\n+c\n'), /longer than/);
+  assert.throws(() => parseUnifiedDiff('@@ -1,5 +1,5 @@\n-a\n+b\n'), /shorter than/);
+  assert.throws(() => parseUnifiedDiff('-a\n+b\n'), /before any @@/);
+  assert.throws(() => parseUnifiedDiff('diff --git a/x b/x\n'), /no @@ hunk header/);
+  assert.throws(() => parseUnifiedDiff(''), /empty/);
+  const ok = parseUnifiedDiff('@@ -1,2 +1,2 @@\n a\n-b\n+c\n');
+  assert.deepEqual(ok, { hunks: 1, added: ['c'], removed: ['b'] });
+});
+
+test('diffs are bounded with an explicit count rather than silently cut', () => {
+  const long = ['@@ -1,1 +1,1 @@', ...Array.from({ length: 50 }, (_, i) => `+line ${i}`)].join('\n');
+  const bound = boundDiff(long, 10);
+  assert.equal(bound.truncated, true);
+  assert.equal(bound.shownLines, 10);
+  assert.equal(bound.totalLines, 51);
+  assert.match(bound.text, /\.\.\. 41 more diff lines truncated \(51 total\)/);
+  assert.ok(!bound.text.includes('line 20'));
+
+  const short = boundDiff('@@ -1,1 +1,1 @@\n+one\n', 10);
+  assert.equal(short.truncated, false);
+  assert.ok(!short.text.includes('truncated'));
+});
+
+test('the bounded diff drops git file headers, which the report already names', () => {
+  const bound = boundDiff([
+    'diff --git a/x b/x', 'index 1111111..2222222 100644', '--- a/x', '+++ b/x',
+    '@@ -1,1 +1,1 @@', '-a', '+b',
+  ].join('\n'), 100);
+  assert.equal(bound.totalLines, 3);
+  assert.ok(!bound.text.includes('diff --git'));
+  assert.match(bound.text, /^@@ /);
+});
+
+test('low sorts below medium so the report still reads worst-first', () => {
+  const world = staleWorld('scripts/x.mjs', '// a\n', '// b\n', { installExtras: ['bin/extra.sh'] });
+  const report = buildReport(world);
+  assert.deepEqual(report.findings.map((f) => f.severity), ['medium', 'low']);
+  assert.equal(report.worstSeverity, 'medium');
+  assert.equal(report.shouldEscalate, false);
+});
+
+test('the provenance line records the routing decision, not just the count', () => {
+  const line = renderProvenance(buildReport(staleWorld('scripts/x.mjs', '// a\n', '// b\n')));
+  assert.match(line, /findings=1/);
+  assert.match(line, /worst=low/);
+  assert.match(line, /escalate=no/);
+});
+
+// APP-260 asked for severity to distinguish the launch path from the sweep
+// path. It is reported and deliberately does NOT move severity: APP-72 — the
+// blind spot this whole check exists for — was a stale *sweep* backstop, so
+// downgrading sweep-path staleness would reinstall the gap.
+test('blast radius is reported for stale findings and does not change severity', () => {
+  const launch = onlyFinding(staleWorld('scripts/agent-launch.sh',
+    '#!/bin/sh\nexec "$@"\n', '#!/bin/sh\nexec env FOO=1 "$@"\n'));
+  assert.equal(launch.f.blastRadius, 'launch-path');
+  assert.equal(launch.f.severity, 'high');
+  assert.match(renderReport(launch.report), /Blast radius: \*\*launch path\*\*/);
+
+  assert.equal(blastRadiusFor('bin/quota-retry-watchdog.mjs'), 'sweep-path');
+  assert.equal(blastRadiusFor('bin/lib/quota-pause-collateral.mjs'), 'sweep-path');
+  assert.equal(blastRadiusFor('bin/agent-launch.sh'), 'launch-path');
+});
+
+// The launch-path table is a hand-maintained claim about what agent-launch.sh
+// touches. Assert it against the launcher's real source so it cannot rot into a
+// comforting lie the way a stale config comment does.
+// Asserted in the direction where a stale table is dangerous. Claiming a file
+// is `sweep-path` when launch actually execs it understates its blast radius;
+// the reverse only overstates it. So: everything agent-launch.sh invokes, and
+// everything the minter it invokes reads, must be in the table.
+test('nothing agent-launch.sh invokes is left out of the launch-path table', async () => {
+  const launcher = await readFile(new URL('../agent-launch.sh', import.meta.url), 'utf8');
+
+  // Script names only: `$SCRIPT_DIR/..` is the repo-root computation, not a file.
+  const invoked = [...launcher.matchAll(/\$SCRIPT_DIR\/([A-Za-z0-9._-]+\.(?:sh|mjs|js))/g)].map((m) => m[1]);
+  assert.ok(invoked.length > 0, 'the launcher must still invoke something, or this test asserts nothing');
+  for (const name of new Set(invoked)) {
+    assert.ok(LAUNCH_PATH_INSTALL_PATHS.has(`bin/${name}`),
+      `agent-launch.sh invokes ${name}, so bin/${name} is on the launch path and must be in LAUNCH_PATH_INSTALL_PATHS`);
+  }
+
+  assert.ok(launcher.includes('.gitconfig-appforge'));
+  assert.ok(LAUNCH_PATH_INSTALL_PATHS.has('.gitconfig-appforge'));
+
+  // The two indirect entries the minter itself names.
+  const minter = await readFile(new URL('../github-app-token.mjs', import.meta.url), 'utf8');
+  for (const [needle, installPath] of [['github-app.mjs', 'bin/lib/github-app.mjs'], ['github-apps.yaml', 'config/github-apps.yaml']]) {
+    assert.ok(minter.includes(needle), `github-app-token.mjs no longer references ${needle}`);
+    assert.ok(LAUNCH_PATH_INSTALL_PATHS.has(installPath));
+  }
 });
