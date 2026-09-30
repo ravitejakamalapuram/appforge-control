@@ -122,6 +122,127 @@ Full model: `docs/containment-model.md`. **Do not probe the unauthenticated
 write path** — the mechanism is established, and a write probe would itself
 create the unattributed write `DEC-0016` records as an accepted cost.
 
+## Task binding is a second, separate binding — and an unbound run can still take a lock
+
+Added 2026-09-30 for [APP-224](/APP/issues/APP-224), measured on the same instance.
+
+Everything above is about **run binding**: whether the server can resolve the
+token's `run_id` to a live heartbeat. There is a second, independent binding —
+whether the run is bound to an **issue** — and it decides different things:
+
+| | run binding | task binding |
+|---|---|---|
+| Carried by | `run_id` claim in `PAPERCLIP_API_KEY` | `PAPERCLIP_TASK_ID`; on the API, `run.contextSnapshot.taskId` / `.issueId` |
+| Failure code | `403 cross_issue_influence_run_context_required` | the same 403, on writes to the issue the run locked |
+| Scope of failure | every write in the run | the write, while `POST /checkout` still returns **200** |
+
+The consequence is the APP-224 defect: **a task-unbound run can take an issue's
+checkout lock it can never write to.** `POST /api/issues/{id}/checkout` returns
+200 and sets `in_progress`; every subsequent `PATCH` and comment on that issue
+403s. Meanwhile the assigned agent's own task-bound run gets `409
+issue_write_assignee_run_lock` on both `PATCH /api/issues/{id}` and
+`POST /checkout` — so for the life of the unbound run, the one status write the
+issue needs can be issued by nobody.
+
+### The discriminator is `contextSnapshot.taskId`, not `invocationSource`
+
+`GET /api/heartbeat-runs/{runId}` exposes both. Only one of them is the answer:
+
+- `contextSnapshot.taskId` / `.issueId` — **this is the binding.** Set on a
+  task-bound run, absent entirely on an unbound one.
+- `invocationSource` — only ever `assignment` or `automation` here (200 runs
+  sampled), and it does **not** track task binding. 53 agent comments in this
+  company were written successfully by `automation` runs, because those runs were
+  task-bound. Classifying on `invocationSource` would be wrong.
+
+### What was actually measured on APP-217 — and what the first reading got wrong
+
+| run | invocationSource | `contextSnapshot.taskId` | held APP-217's lock | outcome |
+|---|---|---|---|---|
+| `a520f601` | automation | absent (**unbound**) | — | failed; wake was a watchdog quota-resume |
+| `47c79a69` | automation | absent (**unbound**) | 00:03:42 → 00:17:26 | could not write; wrote its verdict to an issue *document* instead |
+| `e3b51905` | automation | `b126c0ef…` = **APP-217** | 00:17:27 → 00:23:55 | **closed APP-217** at 00:22:58 |
+
+Two corrections to how this first looked from inside the 409:
+
+1. **It is a bounded starvation window, not a permanent livelock.** The lock was
+   not passed hand-to-hand between unbound runs. Only the *first* holder was
+   unbound; the second was APP-217's own task-bound run, which closed the issue
+   five minutes later, with `assigneeAgentId` intact. The window equals the
+   unbound run's lifetime — here 13m44s.
+2. **A 409 seen from a bound run on a *different* issue is not proof of the
+   defect.** `issue_write_assignee_run_lock` is the documented, correct answer
+   when another run legitimately holds the checkout. Confirm the holder's binding
+   before calling it starvation.
+
+### The continuation retry does not drop the binding — it inherits an absent one
+
+Corrected 2026-09-30 for [APP-181](/APP/issues/APP-181). The paragraph that used
+to sit here read the `47c79a69` / `a520f601` pair as *"a retry dispatched with no
+task binding at all — a retry that drops the binding and then takes checkouts is
+the thing to fix."* The pair is real; the causal direction is not.
+
+`a520f601` was **already unbound** — it is a watchdog quota-resume root, and the
+row above says so. `scheduleBoundedRetryForRun`
+(`@paperclipai/server/dist/services/heartbeat.js`) builds its retry snapshot as
+`withRecoveryContext({ ...contextSnapshot, retryOfRunId, wakeReason, … })`: it
+spreads the predecessor's whole snapshot, so it carries `issueId` forward
+whenever there is one. The continuation retry preserved the binding faithfully.
+There was none to preserve.
+
+Traced over the last 200 runs in this company, every unbound run is either a
+wake-time root or a descendant of one:
+
+| generation | count | wake reason |
+|---|---|---|
+| root | 7 | watchdog `provider_quota` resume / `process_lost` backoff (**ours**, fixed by APP-181) |
+| root | 1 | manual board wake with a free-text reason and no payload (`afe6ae4d`) |
+| descendant | 7 | `max_turns_continuation_retry`, `transient_failure_retry` — inherited, up to 3 deep |
+
+The deepest chain is `ab1b08a0` → `e8a41559` → `1e0a9b23` → `31a3f4ce`: one
+unbound wake, four unbound runs. That is the leverage — binding the root removes
+its whole subtree, and 14 of those 15 runs trace to a root we control.
+
+So the upstream ask is **only** "refuse `POST /checkout` on a task-unbound run".
+"Preserve task binding across continuation retries" should not be filed: the
+continuation path already does, and asking for it would send a maintainer to read
+code that is already correct.
+
+### Always pass the issue on a manual wake
+
+`afe6ae4d` is the one unbound root that is neither ours nor the platform's — a
+board wake whose reason text named the issue in prose (*"Re-push branch
+fix/APP-195-… and open the PR"*) while the payload carried nothing. The woken
+Builder got a run that could not `PATCH` the issue it was woken about.
+
+`paperclipai agent wake` takes `--payload`, and the server reads `issueId` out of
+it (chain traced in `scripts/clear-my-recovery-collateral.mjs`). A wake that names
+an issue should bind it:
+
+```sh
+paperclipai agent wake <agentRef> --reason '<text>' --payload '{"issueId":"<uuid>"}'
+```
+
+### What to do about it
+
+- **Do not force-release it and do not cancel the holding run.** The lock clears
+  by itself when the unbound run ends. Cancellation is what drives the recovery
+  sweep that manufactured the collateral on APP-208/APP-222, and
+  `POST /api/issues/{id}/release` additionally clears `assigneeAgentId`, which
+  turns a self-clearing item into a `board_only` orphan no agent credential can
+  close (APP-83/85/107/110/111/112/116 were made this way).
+- **Wait, or courier.** If the write cannot wait, create a self-assigned issue
+  carrying the whole deliverable — an assigned issue is what generates a
+  task-bound run. That is the courier pattern below, and it is what APP-222 did.
+- **Detection is wired.** `scripts/detect-stuck-execution-locks.mjs` classifies a
+  lock held by a live-but-unbound run as `live_unbound_holder` once it is older
+  than `--unbound-grace-minutes` (default 15m). It remains detection-only, per
+  the CEO ruling on APP-91.
+- **Upstream ask:** refuse `POST /checkout` on a task-unbound run — the lock buys
+  that run nothing, and refusing it fails the run at the point it can still back
+  out instead of stranding the issue. The watchdog-resume half of this is not an
+  upstream ask; it was ours, and APP-181 fixed it at the wake.
+
 ## Is it intermittent?
 
 No. It is **deterministic per run**, decided before the run does any work.

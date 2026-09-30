@@ -282,7 +282,6 @@ export function resetBackoffAttempt(state, agentId, { seenAt } = {}) {
   if (seenAt) agent.lastSuccessSeenAt = seenAt;
 }
 
-/** Records a pending pause->resume+wake action for an agent (one at a time; a new one overwrites a stale pending action for the same agent, e.g. a second quota failure before the first reset arrived). */
 /**
  * The issue a heartbeat run was bound to, or `null` for a run the runtime
  * never bound to one.
@@ -310,6 +309,7 @@ export function readRunIssueId(run) {
   return null;
 }
 
+/** Records a pending pause->resume+wake action for an agent (one at a time; a new one overwrites a stale pending action for the same agent, e.g. a second quota failure before the first reset arrived). */
 export function setPendingAction(state, agentId, action) {
   state.pendingActions[agentId] = action;
 }
