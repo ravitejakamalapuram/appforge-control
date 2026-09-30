@@ -229,18 +229,18 @@ test('a product in input_error withholds the growth pool for the whole portfolio
   assert.equal(a.per_product.length, 1, 'the unevaluable product is not scored');
 });
 
-test('the live InvTrack product.yaml is refused by name (APP-86 is still open)', { skip: haveProductRepos ? false : 'product repos not present' }, () => {
+test('the live InvTrack product.yaml is read and gets no verdict while first_published is unknown', { skip: haveProductRepos ? false : 'product repos not present' }, () => {
+  // APP-86 landed: InvTrack now carries store_item_status, so it is read like every other product.
+  // first_published is still null (the Play launch date is not recorded), so the clock has no
+  // origin and the outcome must be not_applicable. The Play listing is live with real users, so a
+  // literal reading of resolution.order step 1 (not_published) must never be what it gets.
   const r = readProductInput(PRODUCTS_ROOT, 'InvTrack');
-  assert.equal(r.ok, false, 'InvTrack still lacks both keys; when APP-86 lands this test flips');
-  assert.equal(r.problems[0].product, 'invtrack');
-
-  // and specifically NOT the verdict a literal reading of resolution.order
-  // step 1 would produce for it. The Play listing is live with real users.
+  assert.equal(r.ok, true, 'InvTrack product.yaml is readable now that APP-86 landed');
   const [res] = evaluatePortfolio({
     doc: REAL, manifest: [], products: [r], now: new Date('2026-09-29'),
   });
-  assert.equal(res.outcome, 'input_error');
-  assert.notEqual(res.outcome, 'not_applicable');
+  assert.equal(res.outcome, 'not_applicable');
+  assert.deepEqual(res.reason_codes, ['first_published_null']);
   assert.equal(res.reason_codes.includes('not_published'), false);
 });
 
@@ -499,16 +499,8 @@ test('the first run reproduces config §10, product for product', { skip: havePr
   const results = evaluatePortfolio({ doc: REAL, manifest: [], products, now: new Date('2026-09-29') });
   assert.equal(results.length, 9, 'all nine products are reported, one row each');
 
-  // InvTrack is the one divergence from §10, and it is deliberate. §10 predicts
-  // not_applicable / first_published_null for it; APP-86 requires input_error
-  // instead, because InvTrack's product.yaml carries NEITHER key and §10's own
-  // prediction assumed a backfill that has not landed. Asserted explicitly so
-  // the divergence is a checked fact rather than a silent mismatch.
-  const invtrack = results.find((r) => r.product === 'invtrack');
-  assert.equal(invtrack.outcome, 'input_error');
-  assert.equal(REAL.products.invtrack.expected_outcome, 'not_applicable');
-
-  for (const r of results.filter((x) => x.product !== 'invtrack')) {
+  // Every product, InvTrack included, must reproduce the outcome and reason code config §10 predicts.
+  for (const r of results) {
     const expected = REAL.products[r.product];
     assert.ok(expected, `config §10 has no row for ${r.product}`);
     assert.equal(r.outcome, expected.expected_outcome, `${r.product}: outcome`);
