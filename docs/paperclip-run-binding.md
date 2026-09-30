@@ -314,8 +314,6 @@ sweep described one request, and the log showed the comment 4.5 seconds clear of
 the archive/close pair, meaning the mistyped header was on the run's whole write
 path rather than on a single call.
 
-## Is the 403 intermittent?
-
 ## Task binding is a second, separate binding — and an unbound run can still take a lock
 
 Added 2026-09-30 for [APP-224](/APP/issues/APP-224), measured on the same instance.
