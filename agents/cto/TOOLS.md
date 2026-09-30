@@ -181,3 +181,11 @@ installation's, so it will agree with you and prove nothing. Full explanation:
 - A fresh worktree has no generated localization code (it is not committed). Before `flutter analyze` or `flutter test`
   run `flutter pub get && flutter gen-l10n`, otherwise analyze reports dozens of false `app_localizations.dart` errors.
   The exact CI command is the `test:` line in InvTrack's `release.yaml`; mirror it, do not invent a variant.
+
+## Finish every run cleanly (no leftover background processes)
+- Paperclip stops any background process still running when your run ends, and then records the WHOLE run as
+  failed (`adapter_failed`, exit 143) and puts you in `error` - even when your work was complete and correct
+  (APP-283, 2026-10-01). So: never leave a background task running at the end of a run.
+- Prefer foreground commands with a timeout. If you did start something in the background (a long test or build),
+  wait for it to finish, read its result, and only then post your final comment and end the run. If it cannot
+  finish in time, kill it explicitly and say so in your comment instead of abandoning it.

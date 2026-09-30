@@ -170,3 +170,11 @@ installation's, so it will agree with you and prove nothing. Full explanation:
 - If a task needs a fresh npm install (for example a Cloud Functions TypeScript project), say so in your
   comment and let GitHub Actions CI build and test it; never claim something was tested locally when it could
   not be.
+
+## Finish every run cleanly (no leftover background processes)
+- Paperclip stops any background process still running when your run ends, and then records the WHOLE run as
+  failed (`adapter_failed`, exit 143) and puts you in `error` - even when your work was complete and correct
+  (APP-283, 2026-10-01). So: never leave a background task running at the end of a run.
+- Prefer foreground commands with a timeout. If you did start something in the background (a long test or build),
+  wait for it to finish, read its result, and only then post your final comment and end the run. If it cannot
+  finish in time, kill it explicitly and say so in your comment instead of abandoning it.
