@@ -7,8 +7,10 @@ import {
   selectLockedIssues,
   severityFor,
   formatDuration,
+  taskBindingOf,
   DEFAULT_QUEUED_GRACE_MS,
   DEFAULT_ESCALATION_AGE_MS,
+  DEFAULT_UNBOUND_HOLDER_GRACE_MS,
 } from '../lib/detect-stuck-execution-locks.mjs';
 
 const NOW = Date.parse('2026-09-28T14:36:00.000Z');
@@ -193,4 +195,127 @@ test('formatDuration reads as an operator would write it', () => {
   assert.equal(formatDuration(59 * 1000), '0m');
   assert.equal(formatDuration(95 * 60000), '1h 35m');
   assert.equal(formatDuration(null), 'unknown');
+});
+
+// --- APP-224: a live but task-unbound lock holder ---------------------------
+//
+// The shape measured on APP-217: run 47c79a69 was `running` the whole time it
+// held the lock, so the old classifier called it healthy — while every write
+// that run attempted to the locked issue 403d and the assignee's own bound run
+// got a 409. `contextSnapshot.taskId` is what separates the two.
+
+const unboundRun = (over = {}) => ({
+  status: 'running',
+  startedAt: minutesAgo(20),
+  controllerBootId: 'boot-1',
+  contextSnapshot: { wakeReason: 'max_turns_continuation_retry', wakeSource: 'automation' },
+  ...over,
+});
+
+const boundRun = (over = {}) => ({
+  status: 'running',
+  startedAt: minutesAgo(20),
+  controllerBootId: 'boot-1',
+  contextSnapshot: { taskId: 'issue-1', issueId: 'issue-1', wakeReason: 'issue_assigned' },
+  ...over,
+});
+
+test('taskBindingOf reads contextSnapshot, and says unknown when there is none', () => {
+  assert.equal(taskBindingOf(boundRun()), 'bound');
+  assert.equal(taskBindingOf(unboundRun()), 'unbound');
+  assert.equal(taskBindingOf({ status: 'running' }), 'unknown');
+  assert.equal(taskBindingOf({ status: 'running', contextSnapshot: null }), 'unknown');
+  // issueId alone binds the run — the two fields carried the same value on every
+  // bound run measured, but either one is enough.
+  assert.equal(taskBindingOf({ contextSnapshot: { issueId: 'issue-1' } }), 'bound');
+});
+
+test('invocationSource is NOT the discriminator — a bound automation run is healthy', () => {
+  const f = classifyLock({
+    issue: issue({ executionLockedAt: minutesAgo(90) }),
+    run: boundRun({ invocationSource: 'automation' }),
+    now: NOW,
+  });
+  assert.equal(f.stuck, false);
+  assert.equal(f.reason, 'run_live');
+  assert.equal(f.runTaskBinding, 'bound');
+});
+
+test('a live task-unbound holder past its grace is stuck — the APP-224 shape', () => {
+  const f = classifyLock({
+    issue: issue({ executionLockedAt: minutesAgo(16) }),
+    run: unboundRun(),
+    now: NOW,
+  });
+  assert.equal(f.stuck, true);
+  assert.equal(f.reason, 'live_unbound_holder');
+  assert.equal(f.runTaskBinding, 'unbound');
+  assert.match(f.detail, /cannot write to this issue/);
+  // It is a starvation window, not a deadlock: say so, so nobody force-releases it.
+  assert.match(f.detail, /clears on its own when the run ends/);
+});
+
+test('a brief unbound touch of a lock is not reported', () => {
+  const f = classifyLock({
+    issue: issue({ executionLockedAt: minutesAgo(2) }),
+    run: unboundRun({ startedAt: minutesAgo(2) }),
+    now: NOW,
+  });
+  assert.equal(f.stuck, false);
+  assert.equal(f.reason, 'live_unbound_within_grace');
+});
+
+test('the unbound-holder grace boundary is stuck at exactly the threshold', () => {
+  const at = classifyLock({
+    issue: issue({ executionLockedAt: new Date(NOW - DEFAULT_UNBOUND_HOLDER_GRACE_MS).toISOString() }),
+    run: unboundRun(),
+    now: NOW,
+  });
+  assert.equal(at.stuck, true);
+  assert.equal(at.reason, 'live_unbound_holder');
+});
+
+test('an unbound holder whose lock has no timestamp is left alone, not guessed at', () => {
+  const f = classifyLock({
+    issue: issue({ executionLockedAt: null }),
+    run: unboundRun(),
+    now: NOW,
+  });
+  assert.equal(f.stuck, false);
+  assert.equal(f.reason, 'live_unbound_unknown_age');
+});
+
+test('a terminal run is still reported as terminal, whatever its binding', () => {
+  const f = classifyLock({
+    issue: issue({ executionLockedAt: minutesAgo(30) }),
+    run: unboundRun({ status: 'succeeded', completedAt: minutesAgo(10) }),
+    now: NOW,
+  });
+  assert.equal(f.reason, 'run_terminal');
+});
+
+test('the unbound-holder grace is configurable per sweep', () => {
+  const f = classifyLock({
+    issue: issue({ executionLockedAt: minutesAgo(16) }),
+    run: unboundRun(),
+    now: NOW,
+    unboundHolderGraceMs: 60 * 60 * 1000,
+  });
+  assert.equal(f.stuck, false);
+  assert.equal(f.reason, 'live_unbound_within_grace');
+});
+
+test('buildReport threads the unbound grace and reports the holder', () => {
+  const report = buildReport({
+    issues: [issue({ id: 'issue-1', identifier: 'APP-217', executionLockedAt: minutesAgo(14) })],
+    runsById: new Map([['run-1', unboundRun()]]),
+    now: NOW,
+    unboundHolderGraceMs: 10 * 60 * 1000,
+  });
+  assert.equal(report.unboundHolderGraceMs, 10 * 60 * 1000);
+  assert.equal(report.stuck.length, 1);
+  assert.equal(report.stuck[0].reason, 'live_unbound_holder');
+  const rendered = renderReport(report);
+  assert.match(rendered, /task binding `unbound`/);
+  assert.match(rendered, /unbound-holder grace 10m/);
 });
