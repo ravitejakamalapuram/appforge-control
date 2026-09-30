@@ -1,0 +1,6 @@
+{
+  "number": 40,
+  "state": "open",
+  "head": { "sha": "2b7d1f4c9e0a5638ab21cd77e4f09b1a6c3d8e52", "ref": "cto/APP-234-node-test-merge-gate" },
+  "base": { "ref": "main" }
+}
