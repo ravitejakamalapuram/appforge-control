@@ -168,3 +168,94 @@ test('the three live 2026-09-30 findings classify as measured', async (t) => {
     assert.equal(verdict.classification, want, sourcePath);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Independent review of PR #53 (2026-10-01): three reproduced false `low`
+// verdicts, plus a normalisation bug. Each test below failed before its fix.
+// ---------------------------------------------------------------------------
+
+test('a changed shebang is behavioural, never a comment', () => {
+  const v = classify('x.sh', '#!/bin/bash\necho hi\n', '#!/bin/sh\necho hi\n');
+  assert.equal(v.classification, 'behavioural');
+  assert.equal(v.behavioural, true);
+  // And the raw-line veto does not count a `#!` line as a comment either.
+  assert.equal(changedLinesLookInert(diffOf(['#!/bin/bash'], ['#!/bin/sh']), SH), false);
+  // A `#!` anywhere but byte 0 is still an ordinary comment.
+  assert.equal(stripComments('echo a\n#!/not/a/shebang\n', SH), 'echo a');
+});
+
+test('`#` mid-word is not a shell or YAML comment', () => {
+  assert.equal(stripComments('echo a#b\n', SH), 'echo a#b');
+  assert.equal(stripComments('url: http://x/#frag\n', YAML), 'url: http://x/#frag');
+  assert.equal(stripComments('echo a # note\n', SH), 'echo a');
+});
+
+test('a `#` line inside a shell heredoc is data, so a heredoc makes the file unmodelled', () => {
+  for (const [a, b] of [
+    ['cat <<E\n#one\nE\n', 'cat <<E\n#two\nE\n'],
+    ["cat <<-'EOF'\n\t# one\nEOF\n", "cat <<-'EOF'\n\t# two\nEOF\n"],
+  ]) {
+    const v = classify('x.sh', a, b);
+    assert.equal(v.classification, 'unmodelled_construct', a);
+    assert.equal(v.behavioural, true);
+  }
+});
+
+test('a `#` line inside a YAML block scalar is data, so a block scalar makes the file unmodelled', () => {
+  for (const [a, b] of [
+    ['k: |\n  #one\n  x\n', 'k: |\n  #two\n  x\n'],
+    ['k: >-\n  #one\n', 'k: >-\n  #two\n'],
+    ['- |\n  #one\n', '- |\n  #two\n'],
+  ]) {
+    const v = classify('x.yaml', a, b);
+    assert.equal(v.classification, 'unmodelled_construct', a);
+    assert.equal(v.behavioural, true);
+  }
+});
+
+test('a changed match key is never prose, however many words it has', () => {
+  // The quota watchdog shape: the literal is what gets matched, not printed.
+  const direct = classify('x.mjs',
+    "if (s.includes('usage limit reached today')) stop();\n",
+    "if (s.includes('usage limit hit now please')) stop();\n");
+  assert.equal(direct.classification, 'string_only');
+  assert.equal(direct.behavioural, true);
+  // Indirect use through a pattern list is invisible at the literal, so a
+  // literal outside a message sink is never prose either.
+  const listed = classify('x.mjs',
+    "const P = ['usage limit reached today'];\nif (P.some((p) => s.includes(p))) stop();\n",
+    "const P = ['usage limit hit now please'];\nif (P.some((p) => s.includes(p))) stop();\n");
+  assert.equal(listed.classification, 'string_only');
+  const compared = classify('x.mjs',
+    "if (msg === 'the job has already finished') x();\n",
+    "if (msg === 'the job is already finished now') x();\n");
+  assert.equal(compared.classification, 'string_only');
+});
+
+test('prose passes only as a direct argument to a known message sink', () => {
+  for (const sink of ['console.log(', 'console.error(', 'console.warn(', 'new Error(', 'process.stderr.write(']) {
+    const v = classify('x.mjs',
+      `${sink}'the quota pause has been cleared for you');\n`,
+      `${sink}'the quota pause was cleared by the watchdog');\n`);
+    assert.equal(v.classification, 'prose_string_only', sink);
+    assert.equal(v.behavioural, false);
+  }
+  // A concatenation continuation inside the sink call still counts.
+  const concat = classify('x.mjs',
+    "console.log('first part of the message ' + 'and the second part here');\n",
+    "console.log('first part of the message ' + 'and a changed second part');\n");
+  assert.equal(concat.classification, 'prose_string_only');
+  // A sink-shaped name that is not a sink does not.
+  const lookalike = classify('x.mjs',
+    "notconsole.log('the quota pause has been cleared for you');\n",
+    "notconsole.log('the quota pause was cleared by the watchdog');\n");
+  assert.equal(lookalike.classification, 'string_only');
+});
+
+test('newlines and blank lines inside a quote are content, not normalised away', () => {
+  const blank = classify('x.mjs', 'const t = `a\nb`;\n', 'const t = `a\n\nb`;\n');
+  assert.equal(blank.behavioural, true, 'a blank line added inside a template changes the value');
+  assert.equal(stripComments('const t = `a\n\n  b  \n`;\n', JS), 'const t = `a\n\n  b  \n`;');
+  const sh = classify('x.sh', 'echo "a\nb"\n', 'echo "a\n\nb"\n');
+  assert.equal(sh.behavioural, true);
+});
