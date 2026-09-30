@@ -415,7 +415,15 @@ Covers `invtrack` and `teleport`.
 ### 4.2 Play Developer Reporting API (crash rate, ANR rate)
 
 Same service account, plus the `playdeveloperreporting.googleapis.com` API
-enabled on the project. Feeds `play_crash_rate` and `play_anr_rate`.
+enabled on the project (done 2026-10-01 on `rk-release-platform`). Feeds `play_crash_rate` and `play_anr_rate`.
+
+**Runner:** `scripts/play-vitals.mjs --package <pkg>` (logic in `scripts/lib/play-vitals.mjs`, tested). It mints a
+short-lived token from the key file named by `PLAY_SA_KEY_FILE`, queries the crash and ANR metric sets for the last
+14 days (ending 2 days ago: Play's daily data lags and is reported in `America/Los_Angeles`), and exits `0` ok,
+`1` alert, `3` insufficient data, `2` error. `--dry-run` prints the requests without any credential. It alerts when the
+latest day reaches Play's bad-behaviour threshold (user-perceived crash 1.09%, ANR 0.47%) or is at least 2x the trailing
+median; with fewer than 100 users on the latest day it says `insufficient_data` and never a false "ok". Only the ingest
+job holds the key; no agent does.
 
 ### 4.3 The asymmetry that must not be smoothed over
 
