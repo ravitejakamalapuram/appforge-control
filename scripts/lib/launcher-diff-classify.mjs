@@ -54,6 +54,11 @@
  *   .json           nothing — JSON has no comments, so any change is content
  *   anything else   nothing — unknown type is behavioural
  *
+ * In shell and YAML a `#` opens a comment only at the start of a word, and a
+ * `#!` at byte 0 is the interpreter line, never a comment. A file holding a
+ * heredoc or a YAML block scalar is `unmodelled_construct`: a `#` line inside
+ * either is data (PR #53 review, 2026-10-01).
+ *
  * Shell and YAML get comment detection but no string handling on purpose.
  * Shell quoting (`$` expansion inside double quotes, `$'...'`, heredocs) and
  * YAML's unquoted scalars are both too easy to model wrongly, and a wrong
@@ -63,16 +68,38 @@
 
 /** Line-comment and string syntax per file extension. `null` = not modelled. */
 const SYNTAX = Object.freeze({
-  mjs: { line: ['//'], block: [['/*', '*/']], strings: true },
-  js: { line: ['//'], block: [['/*', '*/']], strings: true },
-  cjs: { line: ['//'], block: [['/*', '*/']], strings: true },
-  sh: { line: ['#'], block: [], strings: false },
-  bash: { line: ['#'], block: [], strings: false },
-  yaml: { line: ['#'], block: [], strings: false },
-  yml: { line: ['#'], block: [], strings: false },
+  mjs: { line: ['//'], block: [['/*', '*/']], strings: true, shebang: true },
+  js: { line: ['//'], block: [['/*', '*/']], strings: true, shebang: true },
+  cjs: { line: ['//'], block: [['/*', '*/']], strings: true, shebang: true },
+  sh: { line: ['#'], block: [], strings: false, wordStart: true, shebang: true },
+  bash: { line: ['#'], block: [], strings: false, wordStart: true, shebang: true },
+  yaml: { line: ['#'], block: [], strings: false, wordStart: true },
+  yml: { line: ['#'], block: [], strings: false, wordStart: true },
   gitconfig: { line: ['#', ';'], block: [], strings: false },
   json: null,
 });
+
+/**
+ * Constructs inside which a `#` line is data, not a comment. A shell heredoc
+ * body and a YAML block scalar are both verbatim text, so stripping a `#` line
+ * from one hides a real change. Tracking where each ends is exactly the kind of
+ * modelling the note above declines to do, so their mere presence in either
+ * revision makes the file unmodelled. The patterns over-match on purpose: an
+ * over-match costs a read, an under-match is a false `low`.
+ */
+const UNMODELLED_CONSTRUCTS = Object.freeze({
+  sh: /<<-?\s*['"]?[A-Za-z_]/,
+  bash: /<<-?\s*['"]?[A-Za-z_]/,
+  yaml: /(^|\s|:|-)[|>][-+0-9]*[ \t]*(#.*)?$/m,
+  yml: /(^|\s|:|-)[|>][-+0-9]*[ \t]*(#.*)?$/m,
+});
+
+/** True when either revision holds a construct this module cannot strip safely. */
+export function hasUnmodelledConstruct(sourcePath, ...texts) {
+  const base = typeof sourcePath === 'string' ? sourcePath.split('/').pop() : '';
+  const pattern = UNMODELLED_CONSTRUCTS[base.slice(base.lastIndexOf('.') + 1).toLowerCase()];
+  return Boolean(pattern) && texts.some((t) => pattern.test(t));
+}
 
 /** Classifications this module can return, and whether each is behavioural. */
 export const CLASSIFICATIONS = Object.freeze({
@@ -84,7 +111,7 @@ export const CLASSIFICATIONS = Object.freeze({
   prose_string_only: {
     behavioural: false,
     label: 'prose string literals only',
-    note: 'the code skeleton is byte-identical and every changed literal is multi-word prose (the APP-226 `collateralNote` class). Read the hunks anyway: a prose literal used as a comparison key would still be behavioural, and this classifier cannot see how a literal is used.',
+    note: 'the code skeleton is byte-identical and every changed literal is multi-word prose passed directly to a message sink (console.*, new Error, stderr/stdout.write) — the APP-226 `collateralNote` class. A literal anywhere else may be a match key, so it is never prose here however it reads.',
   },
   string_only: {
     behavioural: true,
@@ -95,6 +122,11 @@ export const CLASSIFICATIONS = Object.freeze({
     behavioural: true,
     label: 'behavioural',
     note: 'executable content changed.',
+  },
+  unmodelled_construct: {
+    behavioural: true,
+    label: 'construct not modelled',
+    note: 'the file contains a shell heredoc or a YAML block scalar. A `#` line inside one is data, not a comment, and this module does not track where they start and end — so it cannot rule out a behavioural change.',
   },
   unmodelled_filetype: {
     behavioural: true,
@@ -138,6 +170,14 @@ export function stripComments(text, syntax) {
   let line = '';
   let quote = null; // the open quote char, or null
 
+  // A `#!` at byte 0 is the interpreter line, not a comment: `#!/bin/bash` to
+  // `#!/bin/sh` changes what runs the file. Anywhere else `#!` is a comment.
+  if (syntax.shebang && text.startsWith('#!')) {
+    const nl = text.indexOf('\n');
+    line = nl === -1 ? text : text.slice(0, nl);
+    i = nl === -1 ? text.length : nl;
+  }
+
   const flush = () => {
     const trimmed = line.replace(/\s+$/, '');
     if (trimmed.trim() !== '') out.push(trimmed);
@@ -148,6 +188,14 @@ export function stripComments(text, syntax) {
     const ch = text[i];
 
     if (ch === '\n') {
+      // Inside an open quote a newline, and any blank line after it, is part
+      // of the value. Flushing there would drop a blank line added to a
+      // template or a multi-line shell string and call the change cosmetic.
+      if (quote) {
+        line += ch;
+        i += 1;
+        continue;
+      }
       flush();
       i += 1;
       continue;
@@ -183,7 +231,10 @@ export function stripComments(text, syntax) {
       continue;
     }
 
-    if (syntax.line.some((marker) => text.startsWith(marker, i))) {
+    // In shell and YAML `#` opens a comment only at the start of a word:
+    // `echo a#b` and `url: http://x/#frag` carry no comment at all.
+    const atWordStart = !syntax.wordStart || line === '' || /\s$/.test(line);
+    if (atWordStart && syntax.line.some((marker) => text.startsWith(marker, i))) {
       const nl = text.indexOf('\n', i);
       i = nl === -1 ? text.length : nl;
       continue;
@@ -211,6 +262,7 @@ export function stripComments(text, syntax) {
 export function blankStrings(text) {
   let out = '';
   const literals = [];
+  const sinkBound = [];
   let i = 0;
   while (i < text.length) {
     const ch = text[i];
@@ -247,6 +299,9 @@ export function blankStrings(text) {
       }
       if (i >= text.length) throw new Error('unterminated string literal');
       i += 1;
+      const before = out;
+      const continues = /\u0000STR\u0000\s*\+\s*$/.test(before) && sinkBound[sinkBound.length - 1] === true;
+      sinkBound.push((MESSAGE_SINK.test(before) || continues) && /^\s*[)+,]/.test(text.slice(i)));
       literals.push(body);
       out += '\u0000STR\u0000';
       continue;
@@ -254,8 +309,17 @@ export function blankStrings(text) {
     out += ch;
     i += 1;
   }
-  return { skeleton: out, literals };
+  return { skeleton: out, literals, sinkBound };
 }
+
+/**
+ * Calls whose string argument is only ever shown to a human. A literal is
+ * prose-eligible only as a direct argument to one of these (or a `+`
+ * continuation of one that is). A literal anywhere else — a comparison, an
+ * `.includes()`, a pattern list read three functions away — may be a match
+ * key, and a changed match key is the silent-inert failure itself.
+ */
+const MESSAGE_SINK = /(?:^|[^\w$.])(?:console\.(?:log|error|warn|info)|new Error|process\.(?:stderr|stdout)\.write)\(\s*$/;
 
 /**
  * Shapes that veto the prose reading however many words a literal has.
@@ -318,6 +382,9 @@ export function changedLinesLookInert(diffText, syntax) {
   return changedDiffLines(diffText).every((raw) => {
     const text = raw.trim();
     if (text === '') return true;
+    // Could be the interpreter line. A diff line carries no line number here,
+    // so every `#!` line is treated as one — the safe way round.
+    if (syntax.shebang && text.startsWith('#!')) return false;
     if (syntax.line.some((marker) => text.startsWith(marker))) return true;
     // Block-comment interior, as JSDoc and friends write it.
     return syntax.block.length > 0 && /^([*]|\/\*|\*\/)/.test(text);
@@ -350,6 +417,7 @@ export function classifyChange({ sourcePath, before, after, diffText } = {}) {
 
   const syntax = syntaxFor(sourcePath);
   if (!syntax) return result('unmodelled_filetype');
+  if (hasUnmodelledConstruct(sourcePath, before, after)) return result('unmodelled_construct');
 
   let strippedBefore;
   let strippedAfter;
@@ -387,10 +455,10 @@ export function classifyChange({ sourcePath, before, after, diffText } = {}) {
   for (let i = 0; i < skeletonAfter.literals.length; i += 1) {
     const from = skeletonBefore.literals[i];
     const to = skeletonAfter.literals[i];
-    if (from !== to) changedLiterals.push({ from, to });
+    if (from !== to) changedLiterals.push({ from, to, sinkBound: skeletonAfter.sinkBound[i] && skeletonBefore.sinkBound[i] });
   }
   if (changedLiterals.length === 0) return commentOnly({ changedLiterals });
 
-  const allProse = changedLiterals.every((pair) => isProseLiteral(pair.from) && isProseLiteral(pair.to));
+  const allProse = changedLiterals.every((pair) => pair.sinkBound && isProseLiteral(pair.from) && isProseLiteral(pair.to));
   return result(allProse ? 'prose_string_only' : 'string_only', { changedLiterals });
 }

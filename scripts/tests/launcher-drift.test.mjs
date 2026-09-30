@@ -383,9 +383,28 @@ test('a tampered file stays critical even when the delta is comment-only', () =>
   assert.equal(report.shouldEscalate, true, 'a comment-only delta cannot talk a tampered file down');
 });
 
-test('the APP-226 case — an advice-string edit — no longer escalates to the CEO', () => {
+test('the APP-226 case — an advice string assigned to a variable — stays high, labelled, with its diff', () => {
+  // PR #53 review (2026-10-01): a literal outside a message sink may be a
+  // match key read elsewhere, and this classifier cannot see where. So the
+  // literal APP-226 shape — `const collateralNote = '...'` — no longer earns
+  // `low`. What APP-226 actually cost was a hand-read of the diff; the report
+  // now carries that diff and names the change `string_only`.
   const before = "  const collateralNote = ' Clear them yourself with the script.';\n";
   const after = "  const collateralNote = ' This wake is task-bound, so you can clear them here.';\n";
+  const { report, f } = staleFinding(staleWorld({
+    sourcePath: 'scripts/quota-retry-watchdog.mjs',
+    before,
+    after,
+    diffText: `--- a/scripts/quota-retry-watchdog.mjs\n+++ b/scripts/quota-retry-watchdog.mjs\n@@ -1 +1 @@\n-${before.trimEnd()}\n+${after.trimEnd()}\n`,
+  }));
+  assert.equal(f.classification, 'string_only');
+  assert.equal(f.severity, 'high');
+  assert.equal(report.shouldEscalate, true);
+});
+
+test('the same advice edit passed straight to a message sink does not escalate', () => {
+  const before = "  console.error('Clear them yourself with the script.');\n";
+  const after = "  console.error('This wake is task-bound, so you can clear them here.');\n";
   const { report, f } = staleFinding(staleWorld({
     sourcePath: 'scripts/quota-retry-watchdog.mjs',
     before,

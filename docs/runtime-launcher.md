@@ -76,14 +76,15 @@ tip, bounded at 80 lines, plus a classification of what changed:
 | classification | severity | what it means |
 | --- | --- | --- |
 | `comment_only` | `low` | comment-stripping both revisions yields identical bytes |
-| `prose_string_only` | `low` | identical code skeleton, every changed literal is multi-word prose |
+| `prose_string_only` | `low` | identical code skeleton, every changed literal is multi-word prose passed directly to a message sink (`console.*`, `new Error`, `stderr/stdout.write`) — a literal anywhere else may be a match key |
 | `string_only` | `high` | identical skeleton, but a changed literal is a flag, path, URL or bare token |
 | `behavioural` | `high` | executable content changed |
+| `unmodelled_construct` | `high` | the file holds a shell heredoc or YAML block scalar, where a `#` line is data |
 | `unmodelled_filetype` / `unavailable` / `unparseable` | `high` | the change could not be inspected |
 
 Everything uncertain resolves to `high`: a false `low` reintroduces the APP-72
 blind spot, a false `high` costs one read. Strings are only modelled for
-`.mjs`/`.js`; shell and YAML get comment detection and nothing else, because
+`.mjs`/`.js`; shell and YAML get comment detection and nothing else (`#` only at a word start, never a `#!` shebang at byte 0), because
 shell quoting and YAML's unquoted scalars are easy to model wrongly and a wrong
 model there produces a false `low`.
 

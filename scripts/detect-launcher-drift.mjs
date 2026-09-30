@@ -46,6 +46,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { diffBetweenCommits, readBlobAtCommit } from './lib/launcher-git-read.mjs';
 import {
   MANIFEST_FILENAME,
   buildReport,
@@ -120,45 +121,6 @@ async function digestAtCommit(repo, commit, relPath) {
       maxBuffer: 32 * 1024 * 1024,
     });
     return sha256(stdout);
-  } catch {
-    return null;
-  }
-}
-
-/** Text of a blob at a commit, or null when it cannot be read as text. */
-async function readBlobAtCommit(repo, commit, relPath) {
-  try {
-    const { stdout } = await run('git', ['-C', repo, 'cat-file', 'blob', `${commit}:${relPath}`], {
-      encoding: 'buffer',
-      maxBuffer: 32 * 1024 * 1024,
-    });
-    // A blob with a NUL byte is binary; there is nothing to classify and
-    // nothing readable to put in the report, so the caller gets `unavailable`
-    // and the finding keeps its `high`.
-    if (stdout.includes(0)) return null;
-    return stdout.toString('utf8');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Unified diff of one path between two commits (APP-261).
- *
- * `git diff <a>..<b> -- <path>` reads history only, never the working tree,
- * so this keeps the same shared-checkout safety the digest reads have. A
- * failure returns null rather than throwing: a diff we cannot take is a
- * classification we cannot make, which the classifier already answers with
- * `unavailable` and therefore `high`.
- */
-async function diffBetweenCommits(repo, from, to, relPath) {
-  try {
-    const { stdout } = await run(
-      'git',
-      ['-C', repo, 'diff', '--no-color', '--no-ext-diff', `${from}..${to}`, '--', relPath],
-      { maxBuffer: 32 * 1024 * 1024 },
-    );
-    return stdout;
   } catch {
     return null;
   }
