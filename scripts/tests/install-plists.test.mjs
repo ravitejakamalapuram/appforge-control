@@ -155,3 +155,15 @@ test('the REAL committed templates render cleanly with fake values and carry no 
   for (const f of readdirSync(s.dest)) assert.equal(statSync(path.join(s.dest, f)).mode & 0o777, 0o600, `${f} is 0600`);
   rmSync(s.root, { recursive: true });
 });
+
+test('every committed infra/macos/*.plist parses as well-formed XML under plistlib', () => {
+  // plutil -lint is lenient (it accepts a `--` inside an XML comment, which expat
+  // does not - APP-249); plistlib uses expat, so it is the check that actually
+  // enforces the XML 1.0 spec install-plists.sh's plutil fallback relies on.
+  for (const f of readdirSync(REAL_TEMPLATES).filter((n) => n.endsWith('.plist'))) {
+    const r = spawnSync('python3', ['-c', 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))', path.join(REAL_TEMPLATES, f)], {
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `${f} failed to parse under plistlib: ${r.stderr}`);
+  }
+});
