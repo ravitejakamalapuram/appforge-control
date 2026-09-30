@@ -234,6 +234,59 @@ actually runs is documented here instead.
 
   Log: `logs/digest-gate.log` / `logs/digest-gate.err.log`.
 
+## Paperclip stale-lock guard (`ing.paperclip.appforge-lock-guard`)
+
+**Why.** After an unclean shutdown (kernel panic 2026-09-28; forced reboot
+2026-09-29 23:57 IST) `~/.paperclip/instances/default/db/postmaster.pid` is
+left behind and its pid is reused by an unrelated daemon (`cfprefsd`).
+Paperclip then refuses to start (`Refusing to reuse PostgreSQL: its data
+directory belongs to another instance`) and `ing.paperclip.paperclipai`
+crash-loops until someone moves the file aside by hand. It happened twice in
+48h; this job does that one step, safely, and nothing else.
+
+**What it does.** Every 60s `paperclip-lock-guard.sh` moves the lock to
+`postmaster.pid.stale-<UTC>` (never `rm`; newest 5 kept) **only if all of**:
+the lock exists; the API is not healthy (`/api/health` != 200 in 3s); the lock
+is older than `MIN_LOCK_AGE_SEC` (60); the pid in it is not a live
+`postgres`/`postmaster`; and no `postgres`/`postmaster` process has this data
+dir in its args. Any doubt means it does nothing. It never touches Paperclip's
+plist or restarts the service - launchd's own `KeepAlive` retries succeed once
+the lock is gone. A low-priority ntfy push is sent when it clears a lock.
+
+**Deploy** (also the way to redeploy after editing the script):
+
+```
+infra/macos/install-lock-guard.sh
+```
+
+The script runs from `~/.appforge-ops/bin/paperclip-lock-guard.sh` (a stable
+copy, mode 0555), **not** from the shared checkout, whose branch changes under
+live agents, and **not** from `~/.appforge`. That directory belongs to the
+runtime-launcher installer, which redeploys it by stage-and-swap of the whole
+tree: on 2026-09-30 01:21 a swap deleted this script, the job started exiting
+127 and the guard went dark. `~/.appforge-ops` is written by nothing else, and
+the installer refuses (`--ops-dir` included, symlinks resolved) to place
+anything under `~/.appforge` or `~/.appforge.prev`.
+
+The committed plist carries a `__NTFY_TOPIC__` placeholder; the installer
+fills it from `$NTFY_TOPIC` or `~/git-personal/.envrc` and writes the result
+`0600`, so the topic is never committed or echoed. Flags: `--no-load`,
+`--ops-dir`, `--dest`, `--envrc` (the last three exist for the tests).
+
+The placeholder follows the same `__NAME__` convention as the generic
+`install-plists.sh` (PR #43), so that installer can render this template as
+well; it does not deploy the script, so `install-lock-guard.sh` remains the
+deploy step for this job.
+
+**Undo an automatic clear** (should never be needed): stop Paperclip, then
+`mv db/postmaster.pid.stale-<UTC> db/postmaster.pid`.
+
+Log: `logs/paperclip-lock-guard.log` (one line per run, self-trimmed to ~1000
+lines past 512KB; `healthy, nothing to do` is the normal line).
+`logs/paperclip-lock-guard.{out,err}.log` catch launchd-level output only.
+Tests: `scripts/tests/paperclip-lock-guard.test.mjs` (drives the real script
+against a fake db dir, fake health endpoint and real postgres-named processes).
+
 ## What's not here (and why)
 
 - No `cloud-init.yaml` for a VPS yet — that's the §4.3 "move-to-VPS
