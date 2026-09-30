@@ -12,7 +12,7 @@
 		<key>PAPERCLIP_COMPANY_ID</key>
 		<string>18b2b6ef-fbaa-48d1-acf4-168841c269ae</string>
 		<key>NTFY_TOPIC</key>
-		<string>appforge-founder-SGVuqZoj2f3PbnOI</string>
+		<string>__NTFY_TOPIC__</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 		<key>HOME</key>
