@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { runImport, runEmitRequest } from '../metrics-import.mjs';
 import { readManifest } from '../lib/metrics-manifest.mjs';
 import { buildStatus } from '../metrics-status.mjs';
-import { evaluateRule, loadContract, assertNotAliased, DECIDABILITY, STATUS } from '../lib/metrics-freshness.mjs';
+import { evaluateRule, evaluateMetric, loadContract, assertNotAliased, DECIDABILITY, STATUS } from '../lib/metrics-freshness.mjs';
 
 import { fileURLToPath } from 'node:url';
 
@@ -385,4 +385,39 @@ test('a declared-but-unprovisioned GA4 metric reads `missing`, never 0', () => {
   assert.ok(row, 'ga4_install_events must be visible in status, not silently absent');
   assert.equal(row.status, STATUS.MISSING);
   assert.equal(row.value, null);
+});
+
+const VITALS_FIXTURE = fileURLToPath(new URL('./fixtures/play-vitals-SYNTHETIC.json', import.meta.url));
+
+test('a play_vitals import lands play_crash_rate and play_anr_rate, served fresh (APP-283)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'metrics-import-vitals-'));
+  const { entry } = runImport({ source: 'play_vitals', item: 'invtrack', file: VITALS_FIXTURE, data_root: dir });
+
+  assert.equal(entry.source, 'play_developer_reporting_api', 'must match the source portfolio.yaml declares');
+  assert.equal(entry.as_of, '2026-09-28');
+  assert.equal(entry.lag_days, 2, 'derived from as_of and the run\'s fetched_at');
+  assert.deepEqual(entry.metrics, { play_crash_rate: 0.0238, play_anr_rate: 0 });
+  assert.deepEqual(entry.notes.distinct_users, { play_crash_rate: 42, play_anr_rate: 42 });
+  assert.equal(entry.notes.verdicts.play_crash_rate, 'insufficient_data');
+  assert.equal(entry.checksum.length, 64);
+  assert.ok(existsSync(entry.raw_path));
+
+  const contract = loadContract(PORTFOLIO);
+  const manifest = readManifest(dir);
+  for (const [metric, value] of [['play_crash_rate', 0.0238], ['play_anr_rate', 0]]) {
+    const r = evaluateMetric({ contract, manifest, metricName: metric, itemId: 'invtrack', now: new Date('2026-10-01T00:00:00Z') });
+    assert.equal(r.status, STATUS.FRESH, metric);
+    assert.equal(r.value, value, metric);
+  }
+});
+
+test('a play_vitals run with no rows writes nothing (APP-283)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'metrics-import-vitals-'));
+  const file = join(dir, 'empty.json');
+  writeFileSync(file, JSON.stringify({
+    package: 'com.invtracker.inv_tracker', window: { start: '2026-09-15', end: '2026-09-28' },
+    fetched_at: '2026-09-30T20:58:55.935Z', crash: { series: [] }, anr: { series: [] },
+  }));
+  assert.throws(() => runImport({ source: 'play_vitals', item: 'invtrack', file, data_root: dir }), /no crash or ANR rows/);
+  assert.equal(readManifest(dir).length, 0);
 });
