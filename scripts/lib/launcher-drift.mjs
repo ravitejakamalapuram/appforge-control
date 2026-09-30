@@ -46,6 +46,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { DEFAULT_DIFF_LINE_LIMIT, boundDiff, classifyStaleChange } from './launcher-diff-classify.mjs';
 
 /**
  * Install-relative path -> source-repo path, for manifests that do not record
@@ -94,7 +95,44 @@ export const FINDING_SEVERITY = Object.freeze({
   unmanaged: 'medium',
 });
 
-const SEVERITY_RANK = { critical: 0, high: 1, medium: 2 };
+const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+
+/**
+ * Install paths on the agent-launch path: read or exec'd by `agent-launch.sh`
+ * on every single agent run, so a stale one is wrong for every agent from the
+ * next launch onward. Everything else in the install tree is reached by the
+ * hourly sweep instead.
+ *
+ * This is REPORTED, not scored. APP-260 argued the sweep-path files deserve a
+ * lower severity than the launch-path ones, and the answer is no: APP-72 — the
+ * blind spot this whole check was built for — was a stale *sweep* backstop, the
+ * worktree prune, sitting inert for days. Downgrading sweep-path staleness would
+ * reinstall the exact gap. The label goes in the report so the reader can judge
+ * blast radius in place; it does not move the severity.
+ *
+ * `scripts/tests/launcher-drift.test.mjs` asserts this table against what
+ * `agent-launch.sh` actually references, so it cannot quietly go stale.
+ */
+export const LAUNCH_PATH_INSTALL_PATHS = Object.freeze(new Set([
+  // Exec'd or read directly by agent-launch.sh.
+  'bin/agent-launch.sh',
+  'bin/prune-agent-worktrees.sh', // line 145, the APP-72 backstop
+  'bin/github-app-token.mjs',     // line 277, the token mint
+  '.gitconfig-appforge',          // GIT_CONFIG_GLOBAL for every agent's git
+  // Transitive dependencies of the token minter agent-launch.sh execs: a stale
+  // one is just as wrong on every launch as a stale agent-launch.sh.
+  'bin/lib/github-app.mjs',
+  'config/github-apps.yaml',
+  // The token minter's runtime deps come from `npm ci` against this lockfile at
+  // install time, so a stale lockfile means launch runs against stale deps.
+  'bin/package.json',
+  'bin/package-lock.json',
+]));
+
+/** `launch-path` when a stale file is wrong for every agent launch, else `sweep-path`. */
+export function blastRadiusFor(installPath) {
+  return LAUNCH_PATH_INSTALL_PATHS.has(installPath) ? 'launch-path' : 'sweep-path';
+}
 
 /** Severities that get their own escalation issue rather than a note on the sweep's issue. */
 export const ESCALATING_SEVERITIES = Object.freeze(new Set(['critical', 'high']));
@@ -177,6 +215,55 @@ function finding(kind, installPath, detail, extra = {}) {
 }
 
 /**
+ * Build the one finding whose severity is not fixed by its kind.
+ *
+ * `stale` starts at the `FINDING_SEVERITY` default of `high` and is lowered to
+ * `low` only when the classifier can prove the delta is comments and whitespace.
+ * Every other outcome — no diff supplied, an unknown file type, an unparseable
+ * diff, a mixed change, changed string text — leaves it `high`. The finding is
+ * always produced; classification adjusts severity and routing and can never
+ * drop it (APP-261).
+ */
+function staleFinding(entry, manifest, { atCommit, atTip, refTipCommit, sourceDiffs, diffLineLimit }) {
+  const supplied = sourceDiffs[entry.sourcePath] ?? null;
+  const classification = supplied
+    ? classifyStaleChange({
+      sourcePath: entry.sourcePath,
+      beforeText: supplied.beforeText,
+      afterText: supplied.afterText,
+      diffText: supplied.diffText,
+    })
+    : {
+      verdict: 'unparseable',
+      severity: FINDING_SEVERITY.stale,
+      label: 'no diff was supplied, so it is treated as behavioural',
+      reason: 'the caller produced no diff for this path; severity stays at the default',
+      family: null,
+    };
+
+  const f = finding('stale', entry.installPath,
+    `merged but not deployed — \`${entry.sourcePath}\` changed on \`${manifest.sourceRef}\` after the install commit, and the live file is still the old one.`,
+    {
+      sourcePath: entry.sourcePath,
+      deployedDigest: atCommit,
+      mergedDigest: atTip,
+      sourceCommit: manifest.sourceCommit,
+      refTipCommit,
+      blastRadius: blastRadiusFor(entry.installPath),
+      classification: {
+        verdict: classification.verdict,
+        label: classification.label,
+        reason: classification.reason,
+        family: classification.family,
+      },
+      diff: supplied ? boundDiff(supplied.diffText, diffLineLimit) : null,
+    });
+
+  f.severity = classification.severity;
+  return f;
+}
+
+/**
  * Compare the three views of every versioned file and return the findings.
  *
  * Inputs are all plain data so this stays testable without a git repo or an
@@ -187,6 +274,12 @@ function finding(kind, installPath, detail, extra = {}) {
  *   - `commitDigests`   source path -> sha256 of the blob at `manifest.sourceCommit`
  *   - `refTipCommit`    the commit `manifest.sourceRef` resolves to now, or null
  *   - `refTipDigests`   source path -> sha256 of the blob at `refTipCommit`
+ *   - `sourceDiffs`     source path -> `{ diffText, beforeText, afterText }` for
+ *                       the install-commit..ref-tip delta, when the caller could
+ *                       produce it. Absent or partial input is fine: a `stale`
+ *                       finding with no diff stays `high`, which is the default
+ *                       this classification only ever narrows downward from with
+ *                       positive evidence.
  *
  * A null digest means "not present at that commit", which is a finding in its
  * own right and not the same as "unchanged".
@@ -198,6 +291,8 @@ export function buildReport({
   commitDigests = {},
   refTipCommit = null,
   refTipDigests = {},
+  sourceDiffs = {},
+  diffLineLimit = DEFAULT_DIFF_LINE_LIMIT,
   installDir = null,
   checkedAt = new Date().toISOString(),
 } = {}) {
@@ -249,9 +344,9 @@ export function buildReport({
         `\`${entry.sourcePath}\` has been removed from \`${manifest.sourceRef}\` since the install, but the file is still live.`,
         { sourcePath: entry.sourcePath, refTipCommit }));
     } else if (atTip !== atCommit) {
-      findings.push(finding('stale', entry.installPath,
-        `merged but not deployed — \`${entry.sourcePath}\` changed on \`${manifest.sourceRef}\` after the install commit, and the live file is still the old one.`,
-        { sourcePath: entry.sourcePath, deployedDigest: atCommit, mergedDigest: atTip, sourceCommit: manifest.sourceCommit, refTipCommit }));
+      findings.push(staleFinding(entry, manifest, {
+        atCommit, atTip, refTipCommit, sourceDiffs, diffLineLimit,
+      }));
     }
   }
 
@@ -304,10 +399,14 @@ export function renderProvenance(report) {
     `installed_by_run=${report.installedByRun ?? 'unknown'}`,
     `versioned_files=${report.versionedCount}`,
     `findings=${report.findings.length}`,
+    `worst=${report.worstSeverity ?? 'none'}`,
+    `escalate=${report.shouldEscalate ? 'yes' : 'no'}`,
   ];
   if (report.installDir) parts.push(`install_dir=${report.installDir}`);
   return parts.join(' ');
 }
+
+const short = (sha) => (typeof sha === 'string' && sha.length > 12 ? sha.slice(0, 12) : (sha ?? 'unknown'));
 
 /** Markdown report for the sweep to carry verbatim. Empty string when clean. */
 export function renderReport(report) {
@@ -328,15 +427,39 @@ export function renderReport(report) {
     lines.push('');
     lines.push(`- ${f.detail}`);
     if (f.sourcePath) lines.push(`- Source path: \`${f.sourcePath}\``);
+    if (f.blastRadius) {
+      lines.push(f.blastRadius === 'launch-path'
+        ? '- Blast radius: **launch path** — `agent-launch.sh` reads or execs this on every agent run, so a stale copy is wrong for every agent from the next launch.'
+        : '- Blast radius: sweep path — reached by the hourly sweep, not by agent launch. Still a real inert control: APP-72 was a stale sweep backstop.');
+    }
+    if (f.classification) lines.push(`- Change: **${f.classification.verdict}** — ${f.classification.label}. ${f.classification.reason}.`.replace(/\.\.$/, '.'));
     if (f.expected) lines.push(`- Expected \`${f.expected}\`, found \`${f.actual ?? 'nothing'}\`.`);
     if (f.deployedDigest) lines.push(`- Deployed blob \`${f.deployedDigest}\`, merged blob \`${f.mergedDigest}\`.`);
     if (f.manifestDigest) lines.push(`- RELEASE says \`${f.manifestDigest}\`, commit has \`${f.commitDigest}\`.`);
+    // The diff goes in the report so severity can be judged where it is read.
+    // On APP-226 its absence cost a CEO ruling and a board approval to arrive at
+    // "routine" (APP-261).
+    if (f.diff && f.diff.text) {
+      lines.push('');
+      lines.push(`<details><summary>\`git diff ${short(f.sourceCommit)}..${short(f.refTipCommit)} -- ${f.sourcePath}\`${f.diff.truncated ? ` (first ${f.diff.shownLines} of ${f.diff.totalLines} lines)` : ''}</summary>`);
+      lines.push('');
+      lines.push('```diff');
+      lines.push(f.diff.text);
+      lines.push('```');
+      lines.push('');
+      lines.push('</details>');
+    }
     lines.push('');
   }
 
   lines.push(report.shouldEscalate
     ? 'Routing: escalate — at least one finding is `critical` or `high`.'
-    : 'Routing: note only — no finding rose above `medium`.');
+    : 'Routing: note only — no finding rose above `medium`. Nothing here needs a CEO ruling.');
+  const noted = report.findings.filter((f) => f.severity === 'low');
+  if (noted.length > 0) {
+    lines.push('');
+    lines.push(`${noted.length} finding${noted.length === 1 ? '' : 's'} carried at \`low\` because the merged delta is comments and whitespace only, proven by comparing both revisions with comments stripped. Classification adjusts severity and routing only — it never drops a finding, and \`critical\` kinds (\`tampered\`, \`missing\`, \`manifest_mismatch\`) are not classified at all, because an unexplained hand-edit to the credential-bearing launcher tree is critical for being unexplained.`);
+  }
   lines.push('');
   lines.push('Detection only. Nothing was redeployed, rewritten, or reverted; remediation is a reviewed install from a named ref (APP-161), not an automatic action by this check.');
   return lines.join('\n');
