@@ -160,3 +160,13 @@ another product's repo), `ci:read`.
 - No `SOPS_AGE_KEY`, `CLOUDFLARE_API_TOKEN`, `R2_*`, `GUMROAD_ACCESS_TOKEN`,
   `ANDROID_KEYSTORE_*`.
 - No editing `SOUL.md` files — its own or any other agent's.
+
+## Host constraints (this Mac) - read before you run a package manager
+- The public npm and yarn registries are blocked on purpose: `/etc/hosts` maps `registry.npmjs.org` and
+  `registry.yarnpkg.com` to `127.0.0.1` (work-managed machine). `npm install`, `npm ci` and any command that
+  downloads from them fail with `ECONNREFUSED`. This is a policy, not an outage: do not retry, do not edit
+  hosts, do not configure proxies or alternative mirrors. Already-installed `node_modules` work; `pub.dev`
+  (Dart/Flutter) and `github.com` work.
+- If a task needs a fresh npm install (for example a Cloud Functions TypeScript project), say so in your
+  comment and let GitHub Actions CI build and test it; never claim something was tested locally when it could
+  not be.
