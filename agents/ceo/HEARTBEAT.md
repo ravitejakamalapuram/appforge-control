@@ -14,7 +14,14 @@ holds, the wake trigger misfired — exit without posting (do-nothing rule,
 3. If something is flagged: draft the daily report (LOW/NORMAL tier per
    §7.1) covering only the flagged items, each as DECISION · EVIDENCE ·
    COST · RISK · EXPECTED IMPACT.
-4. Exit.
+4. Append the **PR queue** section to whichever post steps 2-3 produced:
+   the stdout of `node scripts/pr-queue.mjs` (APP-323), pasted verbatim. It
+   is deterministic, so **do not call the model for it** and do not
+   re-rank or summarise it. Exit 1 means a repo was UNREADABLE: post the
+   section anyway (the line names the repo) and `@CTO`. Exit 2 means the
+   script could not run: post `PR queue: unavailable (<stderr line>)` instead.
+   An open PR alone is not a flagged item for step 2.
+5. Exit.
 
 ## Routine: weekly Mon 09:00 (`routine:weekly-portfolio-review:<date>`)
 1. Pull the full portfolio state (every product), the week's Analyst
