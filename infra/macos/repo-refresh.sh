@@ -15,7 +15,13 @@
 set -uo pipefail
 
 ROOT="${APPFORGE_PRODUCTS_ROOT:-$HOME/git-personal}"
-REPOS="${REPO_REFRESH_REPOS:-InvTrack session-transfer TeluguPanchangam TelePort StellarTab GitaVerses cors-enabler json-workbench echokit}"
+REPOS="${REPO_REFRESH_REPOS-InvTrack session-transfer TeluguPanchangam TelePort StellarTab GitaVerses cors-enabler json-workbench echokit}"
+# Paperclip's own per-project workspace base clones. The Paperclip SERVER holds no GitHub credential (by design), so it cannot
+# refresh a PRIVATE repo's base clone and agent task branches would start from stale code ("Could not refresh base ref ...
+# Repository not found"). This job keeps them current instead, including fast-forwarding their local main.
+WS_ROOT="${REPO_REFRESH_WS_ROOT:-$HOME/.paperclip/instances/default/workspaces-base}"
+# No colon: an explicitly EMPTY value means "none" (tests and ad-hoc runs), only an UNSET one falls back to the default.
+WS_REPOS="${REPO_REFRESH_WS_REPOS-appforge-control InvTrack session-transfer}"
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] repo-refresh: $*"; }
@@ -45,20 +51,31 @@ fetch_authed() {
 }
 
 ok=0; failed=0; skipped=0
-for r in $REPOS; do
-  dir="$ROOT/$r"
+
+# refresh_one <name> <dir> [ffmain]: fetch (anonymous, then one scoped-token retry); with ffmain, also fast-forward the
+# checked-out local main to origin/main when that is a clean fast-forward. Only TRACKED changes count as dirty: Paperclip keeps its
+# task worktrees in an untracked .paperclip/ folder inside the base clone, which must not block the update. Never touches another branch.
+refresh_one() {
+  local r="$1" dir="$2" ff="${3:-}" out how=""
   if [ ! -d "$dir/.git" ] && [ ! -f "$dir/.git" ]; then
-    log "skip $r (no checkout at $dir)"; skipped=$((skipped+1)); continue
+    log "skip $r (no checkout at $dir)"; skipped=$((skipped+1)); return
   fi
   # lowSpeed* turns a stalled connection into a failure instead of a hung job (macOS has no `timeout`).
   if out="$(git -C "$dir" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 fetch --quiet --prune origin 2>&1)"; then
-    log "ok   $r $(git -C "$dir" rev-parse --short origin/main 2>/dev/null || echo '?')"; ok=$((ok+1))
+    how=""
   elif fetch_authed "$r" "$dir"; then
-    log "ok   $r $(git -C "$dir" rev-parse --short origin/main 2>/dev/null || echo '?') (authenticated)"; ok=$((ok+1))
+    how=" (authenticated)"
   else
-    log "FAIL $r: $(printf '%s' "$out" | head -1) (authenticated retry also failed)"; failed=$((failed+1))
+    log "FAIL $r: $(printf '%s' "$out" | head -1) (authenticated retry also failed)"; failed=$((failed+1)); return
   fi
-done
+  if [ "$ff" = "ffmain" ] && [ "$(git -C "$dir" branch --show-current 2>/dev/null)" = "main" ] && [ -z "$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    if git -C "$dir" merge --ff-only -q origin/main >/dev/null 2>&1; then how="$how, main fast-forwarded"; else how="$how, main NOT fast-forwardable"; fi
+  fi
+  log "ok   $r $(git -C "$dir" rev-parse --short origin/main 2>/dev/null || echo '?')$how"; ok=$((ok+1))
+}
+
+for r in $REPOS; do refresh_one "$r" "$ROOT/$r"; done
+for r in $WS_REPOS; do refresh_one "$r" "$WS_ROOT/$r" ffmain; done
 log "done: $ok refreshed, $failed failed, $skipped skipped"
 
 # One broken repo is noise; nothing refreshing at all means the job itself is broken, so say so.
