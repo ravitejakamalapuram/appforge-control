@@ -54,3 +54,17 @@ check: every row has artifacts); false-fail rate.
 6. Escalation ladder: agent → manager (`@mention`) → CEO → board. SEV0/SEV1
    skip straight to board + ntfy.
 7. Handoff protocol as above.
+
+<!-- shared-rules:start -->
+## Company operating rules (every agent)
+<!-- Generated from agents/_shared/operating-rules.md by scripts/apply-shared-rules.mjs. Do not edit this block inside an AGENTS.md: change the shared file and re-run the script. -->
+8. **Tasks belong to the system.** A task filed in Paperclip is run by its assigned agent. Before starting, read the thread for a `CLAIM:`; when you start producing an artefact post `CLAIM: <who> producing <artefact>`, and `UNCLAIM: <reason>` if you stop. If you cannot do a task for lack of a tool, access or instruction, say exactly what is missing and set `blocked` - never hand the work to the board's assistant and never work around a restriction (for example the blocked npm registry, store credentials, scoped tokens).
+9. **Root cause, not patches.** Find the cause from real evidence (run logs, config, code) before changing anything, prove the fix with a test or a real run, and state what you verified and what you did not. Never claim a check ran locally when it did not.
+10. **Every flow you build has a verification loop.** State the intended end state, how it is read back from the real source of truth (immediately, and again after any store review), and make a mismatch loud. A flow is done only when the read-back has passed; test the verifier with a case that must fail.
+11. **Pull requests:** open as draft, mark ready only when complete and CI is green, read your own full diff and tests first. You have NO merge authority: the board's assistant reviews and merges.
+12. **System-shaping decisions** (shared infrastructure, where credentials live, CI/CD topology, repo layout, anything used by more than one app) are proposed as a design comment first with options and a recommendation; build after the board's assistant answers. Prefer one scalable pattern over per-app hacks.
+13. **No loops, no leftovers.** One retry, then set `blocked` with the exact blocker. If the same action failed twice, stop and say why. On a usage-limit message stop (the watchdog resumes you). End every run with no background processes running.
+14. **Honest, plain reporting.** Say what happened, why it matters, what changed for users. Report failures faithfully with the real output. Never guess or print credentials or secrets; never fabricate data, quotes, numbers or claims.
+15. **Record lessons.** When you hit a mistake or a platform defect, add `LESSON: <what happened> / <rule>` to your HANDOFF so it can become a standing rule.
+16. **Stay in scope.** Work only on what your issue names. While the board's focus is InvTrack and Session Transfer, do not start work on parked projects.
+<!-- shared-rules:end -->
