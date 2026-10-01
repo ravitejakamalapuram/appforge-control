@@ -1,0 +1,40 @@
+{
+  "_note": "Hand-written. Field names match the real GitHub REST payloads read on 2026-10-01 (APP-323); the values are invented. One entry per queue state.",
+  "repo": "appforge-control",
+  "now": "2026-10-01T12:00:00Z",
+  "states": {
+    "ready": {
+      "pull": { "number": 11, "title": "fix(infra): green and mergeable (APP-500)", "html_url": "https://github.com/o/r/pull/11", "body": "Why.\n\n## Verification\nRan it.", "draft": false, "mergeable": true, "mergeable_state": "clean", "additions": 40, "deletions": 2, "changed_files": 2, "created_at": "2026-09-28T09:00:00Z", "head": { "ref": "APP-500-ready", "sha": "aaaaaaa1" }, "base": { "ref": "main", "repo": { "default_branch": "main" } } },
+      "files": [{ "filename": "scripts/lib/x.mjs" }, { "filename": "scripts/tests/x.test.mjs" }],
+      "checkRuns": [{ "id": 1, "name": "node-test", "head_sha": "aaaaaaa1", "status": "completed", "conclusion": "success", "started_at": "2026-09-28T09:01:00Z" }]
+    },
+    "needs-rebase": {
+      "pull": { "number": 12, "title": "docs: conflicts with main", "html_url": "https://github.com/o/r/pull/12", "body": "Refs APP-501", "draft": false, "mergeable": false, "mergeable_state": "dirty", "additions": 10, "deletions": 0, "changed_files": 1, "created_at": "2026-09-30T09:00:00Z", "head": { "ref": "docs-x", "sha": "bbbbbbb2" }, "base": { "ref": "main", "repo": { "default_branch": "main" } } },
+      "files": [{ "filename": "docs/x.md" }],
+      "checkRuns": [{ "id": 2, "name": "node-test", "head_sha": "bbbbbbb2", "status": "completed", "conclusion": "success", "started_at": "2026-09-30T09:01:00Z" }]
+    },
+    "red-ci": {
+      "pull": { "number": 13, "title": "feat: red on head", "html_url": "https://github.com/o/r/pull/13", "body": null, "draft": false, "mergeable": true, "mergeable_state": "unstable", "additions": 5, "deletions": 5, "changed_files": 1, "created_at": "2026-09-30T10:00:00Z", "head": { "ref": "feat-red", "sha": "ccccccc3" }, "base": { "ref": "main", "repo": { "default_branch": "main" } } },
+      "files": [{ "filename": ".github/workflows/ci.yml" }],
+      "checkRuns": [
+        { "id": 3, "name": "node-test", "head_sha": "ccccccc3", "status": "completed", "conclusion": "failure", "started_at": "2026-09-30T10:01:00Z" },
+        { "id": 4, "name": "lint", "head_sha": "ccccccc3", "status": "completed", "conclusion": "success", "started_at": "2026-09-30T10:01:00Z" }
+      ]
+    },
+    "waiting": {
+      "pull": { "number": 14, "title": "data: CI still running", "html_url": "https://github.com/o/r/pull/14", "body": "", "draft": false, "mergeable": true, "mergeable_state": "unstable", "additions": 1, "deletions": 1, "changed_files": 1, "created_at": "2026-10-01T08:00:00Z", "head": { "ref": "data-y", "sha": "ddddddd4" }, "base": { "ref": "main", "repo": { "default_branch": "main" } } },
+      "files": [{ "filename": "data/y.json" }],
+      "checkRuns": [{ "id": 5, "name": "node-test", "head_sha": "ddddddd4", "status": "in_progress", "conclusion": null, "started_at": "2026-10-01T08:01:00Z" }]
+    },
+    "draft": {
+      "pull": { "number": 15, "title": "wip: still a draft", "html_url": "https://github.com/o/r/pull/15", "body": "", "draft": true, "mergeable": true, "mergeable_state": "draft", "additions": 3, "deletions": 0, "changed_files": 1, "created_at": "2026-09-20T08:00:00Z", "head": { "ref": "wip", "sha": "eeeeeee5" }, "base": { "ref": "main", "repo": { "default_branch": "main" } } },
+      "files": [{ "filename": "agents/cto/AGENTS.md" }],
+      "checkRuns": [{ "id": 6, "name": "node-test", "head_sha": "eeeeeee5", "status": "completed", "conclusion": "success", "started_at": "2026-09-20T08:01:00Z" }]
+    },
+    "stacked": {
+      "pull": { "number": 16, "title": "feat: built on top of #11", "html_url": "https://github.com/o/r/pull/16", "body": "## Verification\nok", "draft": false, "mergeable": true, "mergeable_state": "clean", "additions": 20, "deletions": 1, "changed_files": 1, "created_at": "2026-09-29T09:00:00Z", "head": { "ref": "APP-502-stacked", "sha": "fffffff6" }, "base": { "ref": "APP-500-ready", "repo": { "default_branch": "main" } } },
+      "files": [{ "filename": "scripts/lib/y.mjs" }],
+      "checkRuns": [{ "id": 7, "name": "node-test", "head_sha": "fffffff6", "status": "completed", "conclusion": "success", "started_at": "2026-09-29T09:01:00Z" }]
+    }
+  }
+}

@@ -1,0 +1,13 @@
+# Repos whose open PRs `scripts/pr-queue.mjs` ranks (APP-323). Every repo here
+# must also be in config/github-apps.yaml `installed_on`, because the queue reads
+# with the agents' App token: a repo the token cannot see is reported as
+# UNREADABLE, never silently dropped.
+owner: ravitejakamalapuram
+repos:
+  - appforge-control
+  - appforge-brain
+  - release-platform
+  - session-transfer
+  - InvTrack
+  - TeluguPanchangam
+  - json-workbench

@@ -53,3 +53,11 @@ the real InvTrack application id, which this repo does not yet know.
 on the same day as the crash series but starts one day later, and one ANR
 value is an explicit `0`. So a test can check two things: `as_of` is the
 newest day both rates carry, and a real zero is recorded as `0`. APP-283.
+
+## `pr-queue-SYNTHETIC.json`
+
+**Hand-written, not a recorded API response.** Field names match the real
+GitHub REST payloads (`/pulls`, `/pulls/{n}`, `/pulls/{n}/files`,
+`/commits/{sha}/check-runs`) as read on 2026-10-01 for APP-323; every value is
+invented. One entry per queue state (ready, needs-rebase, red-ci, waiting,
+draft) plus `stacked`, whose base branch is the `ready` PR's head branch.
