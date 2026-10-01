@@ -499,3 +499,16 @@ routine; that needs CTO/board sign-off.
 is pinged only after a complete pass, an external dead-man's switch for the case where both die (Mac off).
 Install: `infra/macos/install-plists.sh job-liveness`. Preview: `infra/macos/job-liveness.sh --dry-run`.
 Tests: `scripts/tests/job-liveness.test.mjs`.
+
+## merge-worker (CEO-approved low-risk PRs, APP-310)
+
+`merge-worker.sh` + `ing.paperclip.appforge-merge-worker.plist` (LaunchAgent `ing.paperclip.appforge-merge-worker`,
+every 5 min). Runs `scripts/merge-worker.mjs` and reads `config/merge-policy.yaml` from a detached worktree at
+`origin/main`, with a 1-hour appforge-agents App token minted per pass (no founder token, no new permission). It merges a
+PR only for a CEO comment `DECISION: approve merge of <PR url> at <40-char head sha>` and only when: the repo is in the
+policy, the PR is open and App-authored, the head still equals that SHA, every required check is green on it, and every
+changed path is allowed and not denied. It passes the SHA to the merge API, reads the merge back, and posts ONE
+`MERGED`/`REFUSED` comment on the decision's issue; refusals also push via ntfy. First pass starts at install time.
+State: `state/merge-worker-state.json`. Log: `logs/merge-worker.log`. Install:
+`infra/macos/install-plists.sh merge-worker`. Preview: `infra/macos/merge-worker.sh --dry-run`. Tests:
+`scripts/tests/merge-worker.test.mjs`.

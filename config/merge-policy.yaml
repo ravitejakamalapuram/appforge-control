@@ -1,0 +1,54 @@
+# Merge policy for the deterministic merge worker (APP-310, scripts/merge-worker.mjs).
+#
+# The worker merges a PR ONLY when a CEO comment in Paperclip reads
+#   DECISION: approve merge of https://github.com/ravitejakamalapuram/<repo>/pull/<n> at <40-char head sha>
+# and every check below passes: repo listed here, PR open and authored by the
+# appforge-agents App, approved SHA == current head, every required check green on
+# that SHA, and every changed file (and the old path of a rename) matches `allow`
+# and no `deny` glob. Anything else stays with the board's assistant.
+#
+# Phase 1 (board approval on APP-310, 2026-10-01): data and plain docs only.
+# Agent instructions and tests are deliberately NOT mergeable here: an
+# instruction PR that merges itself lets agents rewrite their own rules, and a
+# tests-only PR can weaken the gates this worker relies on.
+#
+# This file is on its own deny list (`config/**`), and the worker reads it from
+# origin/main, so no PR the worker merges can widen this policy.
+version: 1
+approver_agent_id: ac3c7fe2-7dba-40fa-95b6-aef74dbc2a2b # CEO
+app_author: appforge-agents[bot]
+merge_method: squash
+repos:
+  # Product repos are added one at a time, each with its exact check-run name(s).
+  appforge-control:
+    base: main
+    required_checks: [node-test]
+  session-transfer:
+    base: main
+    required_checks: ["ci / Validate and test"]
+allow: # every changed file must match one of these
+  - "product-facts.yaml" # repo root only; a nested copy is not a product-facts file
+  - "data/**/*.yaml"
+  - "docs/**/*.md" # markdown only: agents read docs/ as instructions, so non-markdown files and runbooks are not auto-merged
+deny: # any match refuses, even if allowed above
+  - ".github/**"
+  - "**/release.yaml"
+  - "config/**"
+  - "**/config/**" # nested too (the root-anchored entries above miss x/config/y)
+  - "**/agents/**"
+  - "**/*secret*"
+  - "**/*.pem"
+  - "**/store/**"
+  - "**/src/**"
+  - "agents/**"
+  - "scripts/tests/**"
+  - "docs/containment-model.md"
+  - "docs/capabilities.md"
+  - "docs/agent-repo-scope.md"
+  - "docs/merge-gate.md"
+  # Agent-read runbooks: an auto-merged edit here is a prompt-injection path (security review of PR #85).
+  - "docs/git-credentials-in-agent-runs.md"
+  - "docs/paperclip-run-binding.md"
+  - "docs/runtime-launcher.md"
+  - "docs/metrics-ingest.md"
+  - "docs/store-listing-sync.md"
