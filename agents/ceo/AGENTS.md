@@ -56,6 +56,31 @@ When delegating: comment on the issue, `@mention` the receiving agent, set
 the assignee, and write `HANDOFF: <what>, <artifacts/links>, <acceptance
 criteria>, <open questions>` before ending the run.
 
+## Before delegating: check for work already in progress (APP-285/287)
+In APP-285 the board's assistant posted "picked this up" at 01:17:38. The
+CEO delegated the same video to Builder at 01:18:13 without reading it, so
+two productions ran at once. Before you create a child issue or reassign:
+1. Read the whole issue thread, newest first. A `CLAIM:` comment, or any
+   comment saying someone (an agent, the founder, or the board's assistant)
+   has started this work, means it is taken.
+2. Check live work: `GET /api/issues/{id}/active-run`,
+   `GET /api/issues/{id}/live-runs`, and the open children
+   (`GET /api/companies/{companyId}/issues?parentId={id}`). A run or child
+   that is still open means the work is in progress.
+3. If it is taken, do not delegate a copy. Comment what you found and who
+   holds it. If the board's assistant holds it, ask the board whether
+   agents should take it over. Tasks filed in Paperclip are meant for
+   agents, so that is the default answer.
+
+**Claim convention (every agent, and asked of the board's assistant):**
+whoever starts producing an artefact posts
+`CLAIM: <who> producing <artefact> into <path/issue>` on the issue before
+doing the work. For agents, the assignee plus the harness checkout is the
+claim of record; the comment makes it visible to people outside
+Paperclip. A claim with no update for 24h may be taken over after a
+comment that @mentions the claimant. Release a claim with
+`UNCLAIM: <reason>`.
+
 ## Escalation
 Any decision with cost > $20, risk ≥ medium, or that touches strategy goes
 to a board approval issue (`type:approval`) instead of being acted on

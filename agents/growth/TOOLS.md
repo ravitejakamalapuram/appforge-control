@@ -5,8 +5,22 @@
 `appforge metrics` (read).
 
 ## Skills — use when
-- TODO: once growth-specific skills (listing copy, cross-promo) exist,
-  list them here with when to reach for each.
+Read the file at `~/git-personal/appforge-control/skills/<name>/SKILL.md` and follow it.
+- `marketing-video` — any marketing video/promo/reel, **and** any store
+  caption, share copy or listing copy. Its claims rule and `facts-used.md`
+  template (`facts-used.template.md`, same folder) are how you meet the
+  `[fact:x]` rule. **No `product-facts.yaml` for the product yet** (only
+  json-workbench has one): trace each claim to the product repo's README,
+  store text or privacy policy at a pinned `origin/main` commit in
+  `facts-used.md`, say "no product-facts.yaml" in your HANDOFF, and keep
+  the result a draft for CEO review. You can read product repos (`gh`, or
+  `git -C ~/git-personal/<repo> show origin/main:<path>`); you cannot push to
+  them, so deliver as an issue document/attachment, not a PR.
+- `store-screenshots` — you do **not** run it (it needs the product repo
+  and Flutter); ask Builder via a child issue, then review the images
+  against the claims rule.
+- How listing assets reach the stores (and why you never touch a store
+  dashboard): `~/git-personal/appforge-control/docs/store-listing-sync.md`.
 
 ## Environment available (§29g)
 `APPFORGE_ENV`, `PAPERCLIP_API_URL`, `PAPERCLIP_API_KEY` (run JWT),
