@@ -108,6 +108,13 @@ What you must not do is implement first and discover the wall at push time.
 The work is not wasted because the scope is narrow; it is wasted because the
 scope was checked last instead of first.
 
+## Standing policy: `appforge-control` is CTO/CEO-only
+
+`appforge-control` is deliberately out of Builder's `APPFORGE_AGENT_REPOS`
+(DEC-0021, founder decision on APP-251). Control-repo work is routed to CTO,
+not Builder. A Builder assigned one anyway follows the steps above and hands
+it back to CTO; it does not ask for its scope to be widened.
+
 ## Related
 
 - `docs/git-credentials-in-agent-runs.md` — where the credential lives and how
