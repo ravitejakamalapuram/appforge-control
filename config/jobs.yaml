@@ -19,6 +19,7 @@ expected:
   - release-bridge  # hourly release-platform -> Paperclip + ntfy bridge (APP-293); load with install-plists.sh
   - job-liveness    # this checker (APP-294); load with install-plists.sh
   - merge-worker    # deterministic merge of CEO-approved low-risk PRs (APP-310); load with install-plists.sh
+  - flow-keeper     # wakes idle assigned issues, resumes errored agents, escalates stuck ones; load with install-plists.sh
 
 not_installed:
   sync: deliberately not loaded on this host (board, review of PR #72, 2026-10-01)

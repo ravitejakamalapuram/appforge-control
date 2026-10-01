@@ -1,0 +1,28 @@
+{
+  "package": "com.invtracker.inv_tracker",
+  "window": {
+    "start": "2026-09-16",
+    "end": "2026-09-29"
+  },
+  "fetched_at": "2026-10-01T17:10:35.987Z",
+  "crash": {
+    "status": "insufficient_data",
+    "metric": "userPerceivedCrashRate",
+    "reasons": [
+      "only 0 day(s) of data, need 4"
+    ],
+    "latest": null,
+    "days": 0,
+    "series": []
+  },
+  "anr": {
+    "status": "insufficient_data",
+    "metric": "userPerceivedAnrRate",
+    "reasons": [
+      "only 0 day(s) of data, need 4"
+    ],
+    "latest": null,
+    "days": 0,
+    "series": []
+  }
+}
