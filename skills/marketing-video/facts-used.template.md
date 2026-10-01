@@ -1,6 +1,7 @@
 # facts-used.md: <product> <artefact> (<issue id>)
 
-Sources pinned at: `<repo>@<commit sha>` (and `appforge-brain@<sha>` if product-facts.yaml was used).
+Fetched at / sha: `<repo>` fetched `<UTC time>`, origin/main = `<sha>` (and `appforge-brain` fetched `<UTC time>`, `<sha>` if product-facts.yaml was used). A failed `git fetch origin` stops the work (SKILL.md §1); never fill this from a cached ref.
+Sources pinned at: `<repo>@<commit sha>` (and `appforge-brain@<sha>` if product-facts.yaml was used). Must equal the fetched sha above.
 product-facts.yaml exists for this product: yes / no (if no, README/policy citations below are the trace).
 
 | # | On-screen / copy text (verbatim) | Source (`file:line` or `[fact:key]`) | Exact source wording |
