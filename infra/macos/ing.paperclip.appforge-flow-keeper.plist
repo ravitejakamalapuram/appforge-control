@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Flow keeper. Every 5 minutes, wakes the agent of any assigned Paperclip issue that sits idle (todo, in_progress, stalled in_review,
+  blocked with no live blocker), resumes transiently errored agents, escalates after repeated nudges, writes state/assistant-inbox.json.
+  flow-keeper.sh runs it from a detached worktree at origin/main, never the shared checkout.
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PAPERCLIP_API_URL</key>
+		<string>http://127.0.0.1:3100</string>
+		<key>PAPERCLIP_COMPANY_ID</key>
+		<string>18b2b6ef-fbaa-48d1-acf4-168841c269ae</string>
+		<key>NTFY_TOPIC</key>
+		<string>__NTFY_TOPIC__</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/rkamalapuram</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control</string>
+	<key>ExitTimeOut</key>
+	<integer>240</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>ing.paperclip.appforge-flow-keeper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/infra/macos/flow-keeper.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>StandardErrorPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/flow-keeper.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/flow-keeper.out.log</string>
+</dict>
+</plist>
