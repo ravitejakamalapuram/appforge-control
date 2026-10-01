@@ -30,7 +30,9 @@ notify() {
 fail() { log "FAIL $1 - no merge pass ran"; notify "merge worker did not run: $1"; exit 1; }
 
 cd "$REPO" || fail "cannot cd $REPO"
-git -C "$REPO" fetch origin --quiet || fail "git fetch"
+# shellcheck source=lib/fetch-origin.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/fetch-origin.sh"
+fetch_origin "$REPO" || fail "git fetch (anonymous and scoped-token)"
 
 WT="$(mktemp -d "${TMPDIR:-/tmp}/appforge-merge-worker.XXXXXX")/afc"
 cleanup() { git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1 || true; rm -rf "$(dirname "$WT")" >/dev/null 2>&1 || true; }

@@ -326,3 +326,15 @@ test('a handled decision is not acted on twice', async () => {
   const again = await pass({ github: fakeGithub(), state: first.state });
   assert.equal(again.results.length, 0);
 });
+
+// A launchd job has no git credential: an anonymous `git fetch` of this private repo fails ("Repository not found")
+// and the worker never runs (found on its first scheduled run, 2026-10-01). Every launchd script that fetches the
+// control repo must go through fetch_origin (anonymous first, then a repo-scoped App token).
+test('launchd scripts that fetch the private control repo use fetch_origin, never a bare git fetch', () => {
+  const dir = path.resolve(HERE, '../../infra/macos');
+  for (const f of ['merge-worker.sh', 'job-liveness.sh', 'digest-gate.sh', 'play-vitals.sh']) {
+    const text = readFileSync(path.join(dir, f), 'utf8');
+    assert.match(text, /fetch_origin "\$REPO"/, `${f} must call fetch_origin`);
+    assert.doesNotMatch(text, /^\s*git -C "\$REPO" fetch origin/m, `${f} must not run a bare git fetch`);
+  }
+});
