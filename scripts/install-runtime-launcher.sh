@@ -291,6 +291,7 @@ VERSIONED=(
   "scripts/quota-retry-watchdog.mjs:bin/quota-retry-watchdog.mjs:0555"
   "scripts/lib/quota-retry-watchdog.mjs:bin/lib/quota-retry-watchdog.mjs:0444"
   "scripts/lib/quota-pause-collateral.mjs:bin/lib/quota-pause-collateral.mjs:0444"
+  "scripts/lib/watchdog-notify.mjs:bin/lib/watchdog-notify.mjs:0444"
   "scripts/package.json:bin/package.json:0444"
   "scripts/package-lock.json:bin/package-lock.json:0444"
   ".gitconfig-appforge:.gitconfig-appforge:0444"
@@ -347,6 +348,7 @@ node --check "$STAGE/bin/lib/github-app.mjs"   || die "staged lib/github-app.mjs
 node --check "$STAGE/bin/quota-retry-watchdog.mjs"     || die "staged quota-retry-watchdog.mjs does not parse"
 node --check "$STAGE/bin/lib/quota-retry-watchdog.mjs" || die "staged lib/quota-retry-watchdog.mjs does not parse"
 node --check "$STAGE/bin/lib/quota-pause-collateral.mjs" || die "staged lib/quota-pause-collateral.mjs does not parse"
+node --check "$STAGE/bin/lib/watchdog-notify.mjs" || die "staged lib/watchdog-notify.mjs does not parse"
 # The watchdog resolves its two libs relative to its own directory. Importing it
 # proves bin/lib/ landed with it, which a parse check alone does not: a missing
 # sibling only fails at import time, i.e. on the live 90s tick after the swap.
