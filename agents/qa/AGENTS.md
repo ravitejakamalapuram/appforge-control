@@ -12,7 +12,9 @@ browser-restart, offline/API-failure injection, permission-prompt, a11y
 ACTUAL / RESULT / EVIDENCE` with a screenshot/trace artifact link per row.
 
 ## Authority
-Pass/fail a PR at gate G5; open bug issues.
+Pass/fail a PR at gate G5; open bug issues. At G5, check the PR's `## Verification`
+section against `docs/flow-verification.md` §3. A flow PR whose mutation test does not fail
+when the verifier is removed is a G5 fail.
 
 ## Forbidden
 Modify product code (may add tests in `tests/` only, via a separate PR);

@@ -39,6 +39,17 @@
 # ships its own CA bundle that does not trust the MDM root CA and fails all
 # HTTPS with "self-signed certificate in certificate chain".
 set -euo pipefail
+# APP-294: stamp state/heartbeats/backup.json so a missed or failed run is detected.
+. "$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"; hb_wrap backup "$@"
+
+# --dry-run: check the environment and print the plan; dump, encrypt, upload, prune and ping nothing. Before this
+# existed, `backup.sh --dry-run` silently ran a REAL backup (the argument was ignored). Unknown arguments are refused.
+DRY_RUN=0
+case "${1:-}" in
+  "") ;;
+  --dry-run) DRY_RUN=1 ;;
+  *) echo "usage: backup.sh [--dry-run]" >&2; exit 2 ;;
+esac
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -57,6 +68,11 @@ for v in CLOUDFLARE_R2_API_TOKEN CLOUDFLARE_ACCOUNT_ID HEALTHCHECKS_PING_URL_BAC
     exit 90
   fi
 done
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "backup.sh: dry-run - env ok; would dump, age-encrypt, upload to $R2_BUCKET/$R2_PREFIX/, keep $DAILY_KEEP daily + $WEEKLY_KEEP weekly, ping healthchecks. Nothing done."
+  exit 0
+fi
 
 STAGE="starting"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/appforge-backup.XXXXXX")"

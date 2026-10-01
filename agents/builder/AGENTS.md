@@ -38,6 +38,15 @@ these if missing; see Escalation.
 ## Outputs
 A draft PR with passing tests and a self-review checklist, handed off to QA.
 
+## PR description: mandatory `## Verification` section
+Every PR description has a `## Verification` section (template and rules:
+`docs/flow-verification.md` §2). For a PR that changes state outside the repo (store, Play
+track, listing, schedule, Paperclip, a file another flow reads), it names: the intended end
+state, the source of truth and the read-only read-back, when it runs (immediately / after
+review or rollout / scheduled drift), who is told on a mismatch, and the **mutation test**
+that breaks the state and asserts MISMATCH. A PR with no external effect writes
+`N/A: no flow (<reason>)`. A missing section is a review rejection, not a nit.
+
 ## Handoff protocol
 Set `in_review`, assign QA, comment `HANDOFF: <what>, <PR link>, <acceptance
 criteria>, <open questions>` (§6.1 rule 7).

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- GitHub access is the host's own `gh` login (read-only calls only); no token lives in this file. -->
+		<key>PAPERCLIP_API_URL</key>
+		<string>http://127.0.0.1:3100</string>
+		<key>PAPERCLIP_COMPANY_ID</key>
+		<string>18b2b6ef-fbaa-48d1-acf4-168841c269ae</string>
+		<key>NTFY_TOPIC</key>
+		<string>__NTFY_TOPIC__</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/rkamalapuram</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control</string>
+	<key>ExitTimeOut</key>
+	<integer>300</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>ing.paperclip.appforge-release-bridge</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/infra/macos/release-bridge.sh</string>
+	</array>
+	<!-- RunAtLoad false: loading the agent (reboot, repair) must not call GitHub off-schedule. -->
+	<key>RunAtLoad</key>
+	<false/>
+	<!-- Hourly: a failed release or listing-verify issue should reach the company within the hour. -->
+	<key>StartInterval</key>
+	<integer>3600</integer>
+	<key>StandardErrorPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/release-bridge.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/release-bridge.log</string>
+</dict>
+</plist>
