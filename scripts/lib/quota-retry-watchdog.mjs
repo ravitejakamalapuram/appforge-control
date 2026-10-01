@@ -403,6 +403,23 @@ function usableTimestamp(value) {
 }
 
 /**
+ * The limits the watchdog's sweep runs with. Defined HERE, once, and imported by
+ * quota-retry-watchdog.mjs and its tests, so the value the script uses and the
+ * value the tests pin can never drift apart (a caller that forgot to pass
+ * `maxQuotaPauseMs` used to be untestable).
+ *
+ * Backoff pauses are capped far below 12h, so 12h is outside anything legitimate.
+ * Quota pauses are not: a weekly limit resets days out, so they get 8 days -- the
+ * longest real reset (a week) plus a day of slack. A 12h ceiling there force-resumes
+ * the agent into the same limit every 12h (PR #14 review).
+ */
+export const SWEEP_LIMITS = Object.freeze({
+  overdueMarginMs: 10 * 60_000,
+  maxPauseMs: 12 * 3_600_000,
+  maxQuotaPauseMs: 8 * 86_400_000,
+});
+
+/**
  * Watchdog-owned pauses that have outstayed their welcome, as
  * `[agentId, entry, reason]` triples.
  *

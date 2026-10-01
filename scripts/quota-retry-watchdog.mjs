@@ -78,6 +78,7 @@ import {
   clearWatchdogPause,
   getWatchdogPause,
   overduePauses,
+  SWEEP_LIMITS,
 } from './lib/quota-retry-watchdog.mjs';
 import {
   partitionRecoveryCollateral,
@@ -136,7 +137,6 @@ const DEFAULT_LOOKBACK_MINUTES = 180;
 // understood. 10 minutes is ~6 polling intervals (StartInterval: 90), so a
 // normal due-fire always wins this race comfortably; anything still parked
 // past it is parked because something broke, not because it is early.
-const OVERDUE_RESUME_MARGIN_MS = 10 * 60_000;
 
 // Absolute ceiling on how long this watchdog will leave an agent parked,
 // independent of what its schedule claims. It only fires when the schedule
@@ -147,8 +147,8 @@ const OVERDUE_RESUME_MARGIN_MS = 10 * 60_000;
 // and a daily reset that rolled over can be ~24h away, so they get 8 days --
 // the longest real reset (a week) plus a day of slack. A 12h ceiling there
 // force-resumes the agent into the same limit every 12h (PR #14 review).
-const MAX_PAUSE_MS = 12 * 3_600_000;
-const MAX_QUOTA_PAUSE_MS = 8 * 86_400_000;
+// The sweep limits (overdue margin, backoff ceiling, 8-day quota ceiling) live in lib/quota-retry-watchdog.mjs as
+// SWEEP_LIMITS so the tests pin the exact values this script runs with.
 
 // How long a handled-run-id stays in the state file. Must comfortably
 // exceed DEFAULT_LOOKBACK_MINUTES so a run never "ages out" of the handled
@@ -601,11 +601,7 @@ export async function runOnce(args, { log, recordError = () => {} }) {
   // agent still parked because of us, long past when it should have been?"
   // and, if so, resumes it. FAIL OPEN: a premature resume costs one failed
   // run; a missed resume costs an agent indefinitely.
-  for (const [agentId, entry, why] of overduePauses(state, nowMs, {
-    overdueMarginMs: OVERDUE_RESUME_MARGIN_MS,
-    maxPauseMs: MAX_PAUSE_MS,
-    maxQuotaPauseMs: MAX_QUOTA_PAUSE_MS,
-  })) {
+  for (const [agentId, entry, why] of overduePauses(state, nowMs, SWEEP_LIMITS)) {
     const name = agentName(agentId);
     const known = agentById[agentId];
 

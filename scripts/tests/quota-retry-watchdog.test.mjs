@@ -9,6 +9,7 @@ import {
   clearWatchdogPause,
   getWatchdogPause,
   overduePauses,
+  SWEEP_LIMITS,
   isHandled,
   markHandled,
   pruneHandled,
@@ -326,7 +327,7 @@ test('readRunIssueId: tolerates the snapshot shapes that are not objects, and bl
 // Bounded-pause invariant (APP-103 / DEBT-0003)
 // ---------------------------------------------------------------------------
 
-const SWEEP = { overdueMarginMs: 10 * 60_000, maxPauseMs: 12 * 3_600_000, maxQuotaPauseMs: 8 * 86_400_000 };
+const SWEEP = SWEEP_LIMITS; // the exact values quota-retry-watchdog.mjs runs with
 
 test('a pause whose resume is not yet due is not swept', () => {
   const state = emptyState();
@@ -464,4 +465,30 @@ test('a quota pause still has an absolute bound: the longer quota ceiling catche
   const swept = overduePauses(state, now + 9 * 86_400_000, SWEEP);
   assert.equal(swept.length, 1);
   assert.match(swept[0][2], /maximum-pause ceiling/);
+});
+
+// ---------------------------------------------------------------------------
+// The limits themselves (the script and these tests share ONE definition)
+// ---------------------------------------------------------------------------
+
+test('SWEEP_LIMITS: the quota ceiling outlasts a weekly limit and the backoff ceiling stays short', () => {
+  assert.ok(SWEEP_LIMITS.maxQuotaPauseMs >= 8 * 86_400_000, 'must outlast the longest real reset (a week) plus slack');
+  assert.ok(SWEEP_LIMITS.maxPauseMs <= 12 * 3_600_000, 'backoff pauses are minutes, not days');
+  assert.ok(SWEEP_LIMITS.maxQuotaPauseMs > SWEEP_LIMITS.maxPauseMs);
+  assert.ok(Object.isFrozen(SWEEP_LIMITS), 'a caller must not be able to mutate the shared limits');
+});
+
+test('without a separate quota ceiling a 13h weekly-limit pause WOULD be force-resumed - the failure the split prevents', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now - 13 * 3_600_000, scheduledResumeAtMs: now + 3 * 86_400_000, kind: 'quota', runId: 'r1' });
+  const { maxQuotaPauseMs, ...legacy } = SWEEP; // a caller that predates the split
+  assert.equal(overduePauses(state, now, legacy).length, 1);
+});
+
+test('a BACKOFF pause keeps the short ceiling even when a quota ceiling is configured', () => {
+  const state = emptyState();
+  const now = 1_000_000_000;
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: now - 13 * 3_600_000, scheduledResumeAtMs: now + 3 * 86_400_000, kind: 'backoff', runId: 'r1' });
+  assert.equal(overduePauses(state, now, SWEEP).length, 1);
 });
