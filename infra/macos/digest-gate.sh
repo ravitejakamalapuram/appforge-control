@@ -156,6 +156,9 @@ case "$RC" in
   20)
     log "quiet $OUT"
     [ "$DRY_RUN" = "1" ] && log "dry-run: quiet day, nothing would have fired"
+    # Explicit: the `&&` test above returns 1 when DRY_RUN=0, and launchd would
+    # record that as a failed exit on every quiet day (APP-314).
+    exit 0
     ;;
   *)
     log "FAIL gate exited $RC — the check did not run, so this is NOT a quiet day: $OUT"
