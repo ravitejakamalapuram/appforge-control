@@ -14,7 +14,7 @@ company:
   # config-file pass (a separate agent is currently working on Paperclip's
   # Claude-account auth — this file intentionally does not touch that).
   # Master-plan example shape: paperclip_company_id: "<set at P0-05>"
-  paperclip_company_id: null
+  paperclip_company_id: "18b2b6ef-fbaa-48d1-acf4-168841c269ae" # AppForge AI (APP-150: set 2026-10-01)
 
   north_star: contribution_per_founder_hour   # §27: Monthly Portfolio Contribution per Founder-Hour
 
