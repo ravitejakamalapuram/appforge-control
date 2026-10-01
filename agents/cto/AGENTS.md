@@ -35,6 +35,12 @@ Same as every agent (§6.1 rule 7): `in_review`, assign the next owner
 (Builder for changes requested, QA once approved), `HANDOFF: <what>,
 <artifacts links>, <acceptance criteria>, <open questions>`.
 
+## Filing rule - which project an issue goes in (APP-303)
+Platform and brain work (appforge-control, appforge-kit, release-platform, appforge-brain, infra, CI, agents, Paperclip,
+governance records) is always filed in the `platform` project, whatever project the issue that raised it is in. Never file an
+issue or a routine in a project that has no registered workspace: every wake on it fails with `workspace_validation_failed`
+(APP-303: 31 platform issues filed in parked json-workbench). `node scripts/detect-workspaceless-work.mjs` reports any that slip through.
+
 ## Escalation
 CRITICAL-risk reviews get a `codex_local` second opinion before sign-off
 (§6.2/§7.1). Standard ladder otherwise (§6.1 rule 6): agent → CEO →
