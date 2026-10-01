@@ -96,9 +96,11 @@ const FIXTURE_BODIES = {
   'scripts/quota-retry-watchdog.mjs':
     "import { tick } from './lib/quota-retry-watchdog.mjs';\n" +
     "import { collateral } from './lib/quota-pause-collateral.mjs';\n" +
-    'export const watchdog = { tick, collateral };\n',
+    "import { notify } from './lib/watchdog-notify.mjs';\n" +
+    'export const watchdog = { tick, collateral, notify };\n',
   'scripts/lib/quota-retry-watchdog.mjs': 'export const tick = () => 1;\n',
   'scripts/lib/quota-pause-collateral.mjs': 'export const collateral = () => 1;\n',
+  'scripts/lib/watchdog-notify.mjs': 'export const notify = () => 1;\n',
   'scripts/package.json': JSON.stringify({ name: 'fixture', private: true, type: 'module' }, null, 2) + '\n',
   'scripts/package-lock.json': JSON.stringify({
     name: 'fixture', lockfileVersion: 3, requires: true,
@@ -342,4 +344,17 @@ test('refuses an unknown argument rather than guessing', () => {
   const res = install(fx, ['--nope']);
   assert.equal(res.code, 1);
   assert.match(res.stderr, /unknown argument/);
+});
+
+test('every ./lib module the REAL watchdog imports is in the installer\'s VERSIONED list (a forgotten lib breaks the deploy)', () => {
+  // The synthetic fixture above cannot notice a new lib added to the real watchdog; this reads the real files.
+  const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const watchdog = readFileSync(path.join(repo, 'scripts', 'quota-retry-watchdog.mjs'), 'utf8');
+  const installer = readFileSync(path.join(repo, 'scripts', 'install-runtime-launcher.sh'), 'utf8');
+  const imported = [...watchdog.matchAll(/from '\.\/lib\/([\w.-]+\.mjs)'/g)].map((m) => m[1]);
+  assert.ok(imported.length >= 3, `expected the watchdog to import several libs, found ${imported}`);
+  for (const lib of imported) {
+    assert.ok(installer.includes(`"scripts/lib/${lib}:bin/lib/${lib}:`), `installer VERSIONED is missing scripts/lib/${lib}, which quota-retry-watchdog.mjs imports`);
+    assert.ok(installer.includes(`node --check "$STAGE/bin/lib/${lib}"`), `installer has no parse check for lib/${lib}`);
+  }
 });
