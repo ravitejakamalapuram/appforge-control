@@ -38,11 +38,27 @@ a listing. This is the same gate as a production release.
 
 ## Per-product status
 
-| Product | `listing:` key | images in repo | caller workflow |
+| Product | `listing:` key | listing in repo | caller workflow |
 |---|---|---|---|
-| InvTrack (`com.invtracker.inv_tracker`) | no | no (text only, `android/fastlane/metadata/android/en-US/`) | no |
+| InvTrack (`com.invtracker.inv_tracker`) | InvTrack#728 (draft) | text reseeded from live + 5 phone screenshots | maintainer adds (see below) |
+| Session Transfer (CWS) | session-transfer#13 (draft) | `chrome-store/store.config.json` seeded from live | maintainer adds (see below) |
+| TeluguPanchangam (CWS) | yes | yes | no `listing.yml` yet |
 
-InvTrack's `docs/UPDATE_STORE_LISTING.md` describes an `update-store-listing.yml` workflow that
-no longer exists. Replace that doc when InvTrack opts in.
+## Pitfalls found during adoption (APP-287)
 
-Open design items (APP-287 proposal, pending review; not built): see the APP-287 thread.
+- **Seed from live, not from the repo.** InvTrack's `full_description.txt` had drifted from
+  what was live, and so had Session Transfer's `app-metadata.json`. A first sync from a stale
+  repo copy silently rewrites live text. Read the public store page first and diff it.
+- **The `workflows` permission.** The `appforge-agents` App cannot create or change files under
+  `.github/workflows/`, so the push is rejected. An agent's adoption PR carries everything
+  except `listing.yml`. A maintainer copies `release-platform/templates/listing-caller.yml`
+  verbatim. This is a deliberate gate, not a bug to work around.
+- **Alpha channels.** Emulator captures are RGBA. The check rejects them. Convert with
+  `ffmpeg -i in.png -pix_fmt rgb24 out.png` after you confirm the alpha is fully opaque.
+- **Generated manifests.** The CWS `name` check is skipped when `manifest.config.*` (@crxjs)
+  generates the manifest. Compare `name` with that file by hand.
+
+## Open design item
+
+Auto-triggering `listing` when files under a listing folder change on `main` is proposed on
+APP-287 for review. It is not built.
