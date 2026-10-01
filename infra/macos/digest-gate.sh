@@ -83,7 +83,9 @@ WT="$(mktemp -d "${TMPDIR:-/tmp}/appforge-digest-gate.XXXXXX")/afc"
 cleanup() { git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1 || true; rm -rf "$(dirname "$WT")" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-git -C "$REPO" fetch origin --quiet || { log "FAIL git fetch"; notify "gate did not run: git fetch failed"; exit 1; }
+# shellcheck source=lib/fetch-origin.sh
+. "$(dirname "$0")/lib/fetch-origin.sh"
+fetch_origin "$REPO" || { log "FAIL git fetch (anonymous and scoped-token)"; notify "gate did not run: git fetch failed"; exit 1; }
 git -C "$REPO" worktree add --detach "$WT" origin/main --quiet || { log "FAIL worktree add"; notify "gate did not run: worktree add failed"; exit 1; }
 
 # metrics-digest needs `yaml`, and the fresh worktree has no node_modules of its
@@ -154,6 +156,9 @@ case "$RC" in
   20)
     log "quiet $OUT"
     [ "$DRY_RUN" = "1" ] && log "dry-run: quiet day, nothing would have fired"
+    # Explicit: the `&&` test above returns 1 when DRY_RUN=0, and launchd would
+    # record that as a failed exit on every quiet day (APP-314).
+    exit 0
     ;;
   *)
     log "FAIL gate exited $RC — the check did not run, so this is NOT a quiet day: $OUT"
