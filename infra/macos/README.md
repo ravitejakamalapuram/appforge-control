@@ -465,3 +465,14 @@ data window and pushes via ntfy; a **failed check** pushes via ntfy and exits no
 (`PLAY_SA_KEY_FILE`); the job alone reads it. Install: `infra/macos/install-plists.sh play-vitals`. Preview:
 `infra/macos/play-vitals.sh --dry-run`. Tests: `scripts/tests/play-vitals-job.test.mjs`.
 
+
+## release-bridge (hourly GitHub -> Paperclip + ntfy, APP-293)
+
+`release-bridge.sh` + `ing.paperclip.appforge-release-bridge.plist` (LaunchAgent `ing.paperclip.appforge-release-bridge`,
+hourly). `scripts/release-bridge.mjs` reads the app repos in `release-platform/apps.yaml` (`RELEASE_BRIDGE_APPS`) and
+polls GitHub **read-only** (`gh issue list --label listing-verify`, `gh run list`) for open `listing-verify` issues and
+failed `listing`/`release`/`promote` runs (last 48h). Each NEW one opens ONE Paperclip issue for the CTO and sends ntfy;
+the GitHub issue/run URL is the de-dup key (`state/release-bridge-seen.json`). A `gh` error, an unreadable app list or a
+failed Paperclip POST is **broken**: ntfy plus a non-zero exit, never a quiet day. Uses the host's `gh` login.
+Install: `infra/macos/install-plists.sh release-bridge`. Preview: `infra/macos/release-bridge.sh --dry-run`.
+Tests: `scripts/tests/release-bridge.test.mjs`.
