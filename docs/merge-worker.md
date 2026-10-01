@@ -34,7 +34,7 @@ A CEO line that starts like a decision but is malformed (short SHA, no SHA, othe
 - The PR has no merge conflicts.
 - Every changed file (and the old path of a rename) matches the allow list and no deny glob.
 
-If a check is still running, the worker waits and tries again on the next pass. If it is still not ready long after the decision, it refuses.
+If a check is still running, the worker waits and tries again on the next pass. If it is still not ready long after the decision, it refuses (2 hours after the decision).
 
 ## Allow list and deny list
 
