@@ -9,7 +9,7 @@
 #
 # Safety: `git fetch` only updates remote-tracking refs. It never touches a working tree, the current
 # branch, the index or any uncommitted change, so it is safe to run against checkouts a human is using.
-# Private repos need a credential this job does not hold; they fail quietly and are reported, not fatal.
+# Private repos fall back to a short-lived, repo-scoped App token (see fetch_authed); a repo that still fails is reported, not fatal.
 #
 #   repo-refresh.sh            # fetch every repo in REPO_REFRESH_REPOS under APPFORGE_PRODUCTS_ROOT
 set -uo pipefail
@@ -25,6 +25,25 @@ notify() {
   curl -fsS -m 10 --retry 2 -H "Title: appforge repo-refresh" -d "$1" "https://ntfy.sh/$NTFY_TOPIC" >/dev/null 2>&1 || true
 }
 
+CTL="${APPFORGE_REPO:-$HOME/git-personal/appforge-control}"
+# Private repos need a credential. When an anonymous fetch fails, mint a short-lived App installation token scoped to
+# THAT repo (the same minter the agent launcher uses) and retry once. The token goes to git through environment
+# variables (never argv, so it is not visible in `ps`) and is never logged. REPO_REFRESH_TOKEN_CMD replaces the
+# minter in tests.
+fetch_authed() {
+  local r="$1" dir="$2" json tok b64
+  if [ -n "${REPO_REFRESH_TOKEN_CMD:-}" ]; then
+    json="$($REPO_REFRESH_TOKEN_CMD --repos "$r" 2>/dev/null)" || return 1
+  else
+    json="$(node "$CTL/scripts/github-app-token.mjs" --repos "$r" 2>/dev/null)" || return 1
+  fi
+  tok="$(printf '%s' "$json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).token||"")}catch{}})')"
+  [ -n "$tok" ] || return 1
+  b64="$(printf 'x-access-token:%s' "$tok" | base64 | tr -d '\n')"
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $b64" \
+    git -C "$dir" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 fetch --quiet --prune origin >/dev/null 2>&1
+}
+
 ok=0; failed=0; skipped=0
 for r in $REPOS; do
   dir="$ROOT/$r"
@@ -34,8 +53,10 @@ for r in $REPOS; do
   # lowSpeed* turns a stalled connection into a failure instead of a hung job (macOS has no `timeout`).
   if out="$(git -C "$dir" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 fetch --quiet --prune origin 2>&1)"; then
     log "ok   $r $(git -C "$dir" rev-parse --short origin/main 2>/dev/null || echo '?')"; ok=$((ok+1))
+  elif fetch_authed "$r" "$dir"; then
+    log "ok   $r $(git -C "$dir" rev-parse --short origin/main 2>/dev/null || echo '?') (authenticated)"; ok=$((ok+1))
   else
-    log "FAIL $r: $(printf '%s' "$out" | head -1)"; failed=$((failed+1))
+    log "FAIL $r: $(printf '%s' "$out" | head -1) (authenticated retry also failed)"; failed=$((failed+1))
   fi
 done
 log "done: $ok refreshed, $failed failed, $skipped skipped"

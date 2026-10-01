@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,4 +73,42 @@ test('nothing refreshing at all fails the job loudly', () => {
   const r = run({ APPFORGE_PRODUCTS_ROOT: root, REPO_REFRESH_REPOS: 'bad' });
   assert.equal(r.status, 1);
   assert.match(r.stdout, /0 refreshed, 1 failed/);
+});
+
+test('a failed anonymous fetch retries ONCE with a repo-scoped token, and the token is never printed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rr-'));
+  const priv = repo(root, 'priv');
+  git(priv.dir, 'remote', 'set-url', 'origin', join(root, 'does-not-exist.git')); // fetch cannot succeed either way
+  const argsLog = join(root, 'minter.args');
+  const minter = join(root, 'minter.sh');
+  writeFileSync(minter, `#!/bin/sh\necho "$@" >> "${argsLog}"\necho '{"token":"SECRET-TOKEN-VALUE","expires_at":"x"}'\n`);
+  chmodSync(minter, 0o755);
+  const r = run({ APPFORGE_PRODUCTS_ROOT: root, REPO_REFRESH_REPOS: 'priv', REPO_REFRESH_TOKEN_CMD: minter });
+  assert.equal(readFileSync(argsLog, 'utf8').trim(), '--repos priv', 'the minter is scoped to exactly the failing repo');
+  assert.match(r.stdout, /authenticated retry also failed/);
+  assert.ok(!(r.stdout + r.stderr).includes('SECRET-TOKEN-VALUE'), 'the token must never appear in output');
+});
+
+test('a repo that fetches anonymously never mints a token', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rr-'));
+  repo(root, 'pub');
+  const argsLog = join(root, 'minter.args');
+  const minter = join(root, 'minter.sh');
+  writeFileSync(minter, `#!/bin/sh\necho "$@" >> "${argsLog}"\necho '{"token":"t"}'\n`);
+  chmodSync(minter, 0o755);
+  const r = run({ APPFORGE_PRODUCTS_ROOT: root, REPO_REFRESH_REPOS: 'pub', REPO_REFRESH_TOKEN_CMD: minter });
+  assert.equal(r.status, 0);
+  assert.equal(existsSync(argsLog), false, 'no credential is touched when none is needed');
+});
+
+test('a minter that fails does not crash the job; the repo is just reported as failed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rr-'));
+  const priv = repo(root, 'priv');
+  git(priv.dir, 'remote', 'set-url', 'origin', join(root, 'does-not-exist.git'));
+  const minter = join(root, 'minter.sh');
+  writeFileSync(minter, '#!/bin/sh\nexit 1\n');
+  chmodSync(minter, 0o755);
+  const r = run({ APPFORGE_PRODUCTS_ROOT: root, REPO_REFRESH_REPOS: 'priv', REPO_REFRESH_TOKEN_CMD: minter });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /FAIL priv/);
 });
