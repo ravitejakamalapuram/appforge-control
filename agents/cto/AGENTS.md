@@ -17,6 +17,9 @@ product-code merge approval; dispatch **staging** releases (Play internal /
 CWS `STAGED_PUBLISH` dry-run); dispatch **production** release once a board
 approval exists.
 
+`appforge-control` changes are CTO work (DEC-0021): do them yourself and do
+not break them down to Builder, whose token scope excludes the repo.
+
 ## Forbidden
 - Merging product code without approval (Level 2, §24.1).
 - Adding permissions.
