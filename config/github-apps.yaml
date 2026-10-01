@@ -29,6 +29,7 @@ apps:
       - session-transfer
       - InvTrack # onboarded 2026-09-30: treated like every other product repo (founder decision)
       - release-platform # added 2026-10-01 (founder decision): agents may push BRANCHES and open draft PRs here. Preconditions met first: main is protected (PR required, no force-push/deletion), and `workflows` stays withheld, so .github/workflows/** still goes through the board's assistant. Merge and release dispatch remain the assistant's/founder's.
+      - pr-triage # added 2026-10-01 (founder decision): our multi-repo PR triage dashboard (APP-324); the App installation is 'All repositories', so it is covered automatically
     # NOTE (2026-09-30): InvTrack was previously excluded here under an "extra-care" policy. The
     # founder removed that special status: InvTrack is now an ordinary product repo, in `installed_on`
     # and in the agents' APPFORGE_AGENT_REPOS like the rest. The GitHub App installation already

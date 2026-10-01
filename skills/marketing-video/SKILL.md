@@ -41,11 +41,24 @@ had this procedure. This file is that procedure.
 
 Never show real user data, account names, emails or credentials. Demo data only.
 
+**Fetch before you read (required).** In each repo you read facts from (the product repo, and
+`appforge-brain` if you use `product-facts.yaml`), run `git fetch origin` first.
+
+- Fetch succeeds: record `git rev-parse origin/main` and the UTC time in the "Fetched at / sha"
+  field of `facts-used.md`. That sha is the pinned commit for every row.
+- Fetch fails: **stop**. Do not read facts from the cached `origin/main`. Post on the issue the
+  exact error output, the cached sha (`git rev-parse origin/main`) and its last fetch time
+  (`stat` of `.git/FETCH_HEAD`), and how far behind it is if you know (for example
+  `git ls-remote origin main` or the GitHub API shows a newer sha). Set the issue `blocked`
+  and `@mention` your manager (CEO). A cached ref is never a pinned commit, and an "open
+  question" is not a substitute for stopping (APP-288: fetch failed, claims were pinned to a
+  cached sha two commits behind main).
+
 ## 2. Claims rule (non-negotiable)
 
 1. Every word on screen and in the share copy that states a capability, a number or a property
    gets a row in `facts-used.md` (template: `skills/marketing-video/facts-used.template.md`)
-   pointing at `file:line` at a pinned commit, or at a `[fact:x]` key in `product-facts.yaml`.
+   pointing at `file:line` at the pinned (freshly fetched) commit, or at a `[fact:x]` key in `product-facts.yaml`.
    No row, no claim: cut it.
 2. Never invent numbers: no user counts, ratings, downloads, savings, returns, "X% faster".
    Numbers visible inside demo-data screenshots are allowed, but only as UI, never as a claim.

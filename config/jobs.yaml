@@ -1,0 +1,25 @@
+# appforge-control/config/jobs.yaml
+#
+# Which launchd jobs are EXPECTED to be loaded on the host (APP-294, review of PR #72). scripts/job-liveness.mjs
+# watches exactly the `expected` jobs: a stamp that is missing, late or failed is a finding, and so is an expected
+# job that `launchctl list` does not show as loaded. Jobs under `not_installed` are deliberately not loaded here
+# and are never watched, so they cannot raise a false "never-ran" alarm.
+#
+# Every infra/macos/ing.paperclip.appforge-*.plist template must be listed in exactly one of the two sections
+# (scripts/tests/job-liveness.test.mjs enforces it), so a new job forces a reviewed decision. Moving a job between
+# the sections is a change to what the company is told about; it goes through a PR like any other config.
+
+schema: appforge/jobs@1
+
+expected:
+  - backup          # nightly encrypted DB backup to R2
+  - lock-guard      # Paperclip DB lock guard
+  - play-vitals     # daily Play crash/ANR check
+  - repo-refresh    # hourly product-repo origin/* refresh
+  - release-bridge  # hourly release-platform -> Paperclip + ntfy bridge (APP-293); load with install-plists.sh
+  - job-liveness    # this checker (APP-294); load with install-plists.sh
+
+not_installed:
+  sync: deliberately not loaded on this host (board, review of PR #72, 2026-10-01)
+  quota-watchdog: deliberately not loaded on this host (board, review of PR #72, 2026-10-01)
+  digest-gate: deliberately not loaded on this host (board, review of PR #72, 2026-10-01)

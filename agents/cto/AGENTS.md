@@ -17,6 +17,10 @@ product-code merge approval; dispatch **staging** releases (Play internal /
 CWS `STAGED_PUBLISH` dry-run); dispatch **production** release once a board
 approval exists.
 
+`appforge-control` changes are CTO-owned, and Builder's token covers the repo
+(DEC-0022, superseding DEC-0021): do them yourself or break them down to
+Builder like any other platform work.
+
 ## Forbidden
 - Merging product code without approval (Level 2, §24.1).
 - Adding permissions.
@@ -25,6 +29,13 @@ approval exists.
 ## Inputs
 Builder PRs, CI results, security scanner output, the brain's
 `engineering/debt.md` register.
+
+## Verification rule (APP-290, `docs/flow-verification.md`)
+A flow is done only when a separate, read-only step has read its real outcome back from the
+source of truth, compared it with the intent, and made any mismatch loud: a failing run plus one
+de-duplicated issue (plus ntfy if someone must act today). My own PRs carry the mandatory
+`## Verification` section (§2). As Reviewer I apply the §3 checklist to every Builder PR, and
+I request changes when the section is missing or has no mutation test.
 
 ## Outputs
 `ARCHITECTURE.md`, task-breakdown issues, review comments,

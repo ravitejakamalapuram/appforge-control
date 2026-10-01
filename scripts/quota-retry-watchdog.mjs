@@ -58,6 +58,7 @@ import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mk
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import {
   parseResetTime,
@@ -708,8 +709,33 @@ export async function reportPassOutcome(notifier, { failure }, { alertStateFile,
   }
 }
 
+// APP-294: last-success stamp read by scripts/job-liveness.mjs. Inlined (same shape as lib/job-heartbeat.mjs) because
+// the deployed copy of this file must stay standalone. Never throws: a stamp problem must not stop the watchdog.
+function stampHeartbeat(args, exitCode) {
+  if (args.dryRun) return;
+  try {
+    const dir = join(process.env.APPFORGE_STATE_DIR
+      ?? (args.stateFile === DEFAULT_STATE_FILE ? join(homedir(), 'git-personal/appforge-control/state') : dirname(args.stateFile)), 'heartbeats');
+    const file = join(dir, 'quota-watchdog.json');
+    let prev = null;
+    try { prev = JSON.parse(readFileSync(file, 'utf8')); } catch { /* first run or unreadable: replaced */ }
+    const now = new Date().toISOString();
+    mkdirSync(dir, { recursive: true });
+    const stamp = exitCode === null
+      ? { job: 'quota-watchdog', started: now, finished: null, exitCode: null, lastSuccess: prev?.lastSuccess ?? null }
+      : { job: 'quota-watchdog', started: prev?.started ?? now, finished: now, exitCode, lastSuccess: exitCode === 0 ? now : prev?.lastSuccess ?? null };
+    writeFileSync(`${file}.tmp`, JSON.stringify(stamp) + '\n');
+    renameSync(`${file}.tmp`, file);
+  } catch { /* best effort */ }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  stampHeartbeat(args, null);
+  try { await runMain(args); } finally { stampHeartbeat(args, process.exitCode ?? 0); }
+}
+
+async function runMain(args) {
   const log = makeLogger(args.logFile);
 
   // APP-103 / DEBT-0003: liveness signalling, same pattern backup.sh and
