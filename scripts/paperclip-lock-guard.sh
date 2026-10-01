@@ -41,6 +41,27 @@ NTFY_URL_BASE="${NTFY_URL_BASE:-https://ntfy.sh}"
 KEEP_STALE=5
 LOCK="$DB_DIR/postmaster.pid"
 
+# APP-294: last-success stamp read by scripts/job-liveness.mjs (same shape as infra/macos/heartbeat.sh; inlined because
+# this file is deployed standalone). Re-runs itself as a child so the stamp carries the real exit code.
+if [ "${HB_ACTIVE:-}" != "lock-guard" ]; then
+  HB_DIR="${APPFORGE_STATE_DIR:-$HOME/git-personal/appforge-control/state}/heartbeats"
+  hb_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  hb_prev="$(sed -n 's/.*"lastSuccess":"\([^"]*\)".*/\1/p' "$HB_DIR/lock-guard.json" 2>/dev/null | head -1)"
+  hb_put() { # finished exitCode lastSuccess ("" = null)
+    mkdir -p "$HB_DIR" 2>/dev/null || return 0
+    local f="null" e="null" l="null"
+    [ -n "$1" ] && f="\"$1\""; [ -n "$2" ] && e="$2"; [ -n "$3" ] && l="\"$3\""
+    printf '{"job":"lock-guard","started":"%s","finished":%s,"exitCode":%s,"lastSuccess":%s}\n' "$hb_started" "$f" "$e" "$l" \
+      >"$HB_DIR/lock-guard.json.tmp" 2>/dev/null && mv "$HB_DIR/lock-guard.json.tmp" "$HB_DIR/lock-guard.json" 2>/dev/null
+    return 0
+  }
+  hb_put "" "" "$hb_prev"
+  HB_ACTIVE=lock-guard /bin/bash "$0" "$@"; hb_rc=$?
+  hb_end="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [ "$hb_rc" -eq 0 ]; then hb_put "$hb_end" 0 "$hb_end"; else hb_put "$hb_end" "$hb_rc" "$hb_prev"; fi
+  exit "$hb_rc"
+fi
+
 case "$MIN_LOCK_AGE_SEC" in ''|*[!0-9]*) MIN_LOCK_AGE_SEC=60 ;; esac
 
 log() {

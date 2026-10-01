@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- No token lives in this file: the checker only reads stamps, plists and the local control plane. -->
+		<key>PAPERCLIP_API_URL</key>
+		<string>http://127.0.0.1:3100</string>
+		<key>PAPERCLIP_COMPANY_ID</key>
+		<string>18b2b6ef-fbaa-48d1-acf4-168841c269ae</string>
+		<key>NTFY_TOPIC</key>
+		<string>__NTFY_TOPIC__</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/rkamalapuram/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/rkamalapuram</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control</string>
+	<key>ExitTimeOut</key>
+	<integer>300</integer>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>ing.paperclip.appforge-job-liveness</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/rkamalapuram/git-personal/appforge-control/infra/macos/job-liveness.sh</string>
+	</array>
+	<!-- RunAtLoad false: loading the agent (reboot, repair) must not open or close issues off-schedule. -->
+	<key>RunAtLoad</key>
+	<false/>
+	<!-- Every 10 min: the tightest watched job is the 60 s lock-guard (grace 5 min); a dead job is flagged within ~15 min. -->
+	<key>StartInterval</key>
+	<integer>600</integer>
+	<key>StandardErrorPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/job-liveness.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/rkamalapuram/git-personal/appforge-control/logs/job-liveness.log</string>
+</dict>
+</plist>

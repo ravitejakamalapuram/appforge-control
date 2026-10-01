@@ -39,6 +39,8 @@
 # ships its own CA bundle that does not trust the MDM root CA and fails all
 # HTTPS with "self-signed certificate in certificate chain".
 set -euo pipefail
+# APP-294: stamp state/heartbeats/backup.json so a missed or failed run is detected.
+. "$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"; hb_wrap backup "$@"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 

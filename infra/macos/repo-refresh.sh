@@ -13,6 +13,8 @@
 #
 #   repo-refresh.sh            # fetch every repo in REPO_REFRESH_REPOS under APPFORGE_PRODUCTS_ROOT
 set -uo pipefail
+# APP-294: stamp state/heartbeats/repo-refresh.json so a missed or failed run is detected.
+. "$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"; hb_wrap repo-refresh "$@"
 
 ROOT="${APPFORGE_PRODUCTS_ROOT:-$HOME/git-personal}"
 REPOS="${REPO_REFRESH_REPOS:-InvTrack session-transfer TeluguPanchangam TelePort StellarTab GitaVerses cors-enabler json-workbench echokit}"

@@ -28,6 +28,8 @@
 # reported as a gate failure.
 
 set -uo pipefail
+# APP-294: stamp state/heartbeats/digest-gate.json so a missed or failed run is detected.
+. "$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"; hb_wrap digest-gate "$@"
 
 # --dry-run does everything except the POST that wakes Analyst: fetch, worktree,
 # node_modules link, the digest, and the exit-code decision, reporting which
@@ -105,6 +107,18 @@ ln -s "$REPO/scripts/node_modules" "$WT/scripts/node_modules" || {
   notify "gate did not run: node_modules link failed"
   exit 1
 }
+
+# APP-294, "who checks the checker": the schedule-liveness checker watches this job through its stamp, and this job
+# watches the checker's stamp. If the checker has stopped, --self-only exits 1 and sends ntfy. It does not change the
+# gate's own result. (The checker's optional HEALTHCHECKS_PING_URL_LIVENESS dead-man's switch covers both dying.)
+if [ "$DRY_RUN" != "1" ]; then
+  if [ -f "$WT/scripts/job-liveness.mjs" ]; then
+    (cd "$WT" && APPFORGE_STATE_DIR="${APPFORGE_STATE_DIR:-$REPO/state}" "$NODE_BIN" scripts/job-liveness.mjs --self-only) \
+      || log "WARN schedule-liveness checker is not running (see its self-check above)"
+  else
+    log "WARN origin/main has no scripts/job-liveness.mjs yet: the checker's own stamp is not being checked"
+  fi
+fi
 
 OUT="$(cd "$WT" && "$NODE_BIN" scripts/metrics-digest.mjs --gate 2>&1)"
 RC=$?

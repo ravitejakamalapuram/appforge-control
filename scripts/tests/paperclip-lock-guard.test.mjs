@@ -90,7 +90,7 @@ async function spawnAs(world, argv0) {
 
 async function runGuard(world, env = {}) {
   const { stdout, stderr } = await execFileP('/bin/bash', [GUARD], {
-    env: { ...cleanEnv(), PAPERCLIP_DB_DIR: world.db, PAPERCLIP_GUARD_LOG: world.log, MIN_LOCK_AGE_SEC: '60', ...env },
+    env: { ...cleanEnv(), PAPERCLIP_DB_DIR: world.db, PAPERCLIP_GUARD_LOG: world.log, APPFORGE_STATE_DIR: path.join(world.db, '..', 'state'), MIN_LOCK_AGE_SEC: '60', ...env },
   });
   return { stdout, stderr, log: existsSync(world.log) ? readFileSync(world.log, 'utf8') : '' };
 }

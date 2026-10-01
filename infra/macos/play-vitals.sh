@@ -13,6 +13,8 @@
 #
 #   play-vitals.sh [--dry-run]     # dry-run: print the requests, call nothing, open nothing
 set -uo pipefail
+# APP-294: stamp state/heartbeats/play-vitals.json so a missed or failed run is detected.
+. "$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"; hb_wrap play-vitals "$@"
 
 DRY_RUN=0
 case "${1:-}" in

@@ -476,3 +476,24 @@ the GitHub issue/run URL is the de-dup key (`state/release-bridge-seen.json`). A
 failed Paperclip POST is **broken**: ntfy plus a non-zero exit, never a quiet day. Uses the host's `gh` login.
 Install: `infra/macos/install-plists.sh release-bridge`. Preview: `infra/macos/release-bridge.sh --dry-run`.
 Tests: `scripts/tests/release-bridge.test.mjs`.
+
+
+## job-liveness (did every job run? APP-294)
+
+Every job writes a stamp, `state/heartbeats/<job>.json` = `{job, started, finished, exitCode, lastSuccess}`: shell jobs through
+`heartbeat.sh` (`hb_wrap <job> "$@"` re-runs the script as a child, so the stamp has the real exit code; `--dry-run` is not a run),
+`lock-guard` and `quota-watchdog` inline (they deploy standalone). `job-liveness.sh` + `ing.paperclip.appforge-job-liveness.plist`
+(every 10 min, from a detached `origin/main` worktree) reads the cadence from each committed plist
+(`StartInterval` / `StartCalendarInterval`) and reports, per job: **never-ran** (no stamp), **failed** (last exit non-zero),
+**overdue** (last success older than cadence + grace; grace = max(5 min, cadence/2), 3 h for daily jobs, 12 h for weekly),
+**unreadable** or **no-cadence**. It also runs `sync-agent-instructions.mjs` (report mode) and `detect-launcher-drift.mjs`:
+exit 1 = drift, any other failure = broken. Each finding opens **one** Paperclip issue (`Schedule liveness: <key>`, CTO) plus
+ntfy and closes that issue by itself when the key is healthy again. A pass right after the Mac slept (checker's own last
+success older than 2 cycles) holds alerts one pass so jobs can catch up. Does not unpause the "Hourly platform integrity sweep"
+routine; that needs CTO/board sign-off.
+**Who checks the checker:** (1) the digest gate (`digest-gate.sh`, separate launchd job, daily 06:30) runs
+`job-liveness.mjs --self-only`, which fails and sends ntfy if the checker's own stamp is missing or older than cadence + grace;
+(2) the checker watches the digest gate's stamp, so the two watch each other; (3) optional `HEALTHCHECKS_PING_URL_LIVENESS`
+is pinged only after a complete pass, an external dead-man's switch for the case where both die (Mac off).
+Install: `infra/macos/install-plists.sh job-liveness`. Preview: `infra/macos/job-liveness.sh --dry-run`.
+Tests: `scripts/tests/job-liveness.test.mjs`.
