@@ -5,13 +5,17 @@
 //   --self-only  only check that THIS checker ran recently (the digest gate calls this: who checks the checker).
 // Exit 0: every job fresh and both drift checks clean. Exit 1: a finding or the checker is broken (ntfy sent).
 // Env: PAPERCLIP_API_URL, PAPERCLIP_COMPANY_ID, NTFY_TOPIC (optional), LIVENESS_ASSIGNEE, LIVENESS_PROJECT (optional),
-//      HEALTHCHECKS_PING_URL_LIVENESS (optional dead-man's switch), APPFORGE_STATE_DIR, LIVENESS_PLIST_DIR.
+//      HEALTHCHECKS_PING_URL_LIVENESS (optional dead-man's switch), APPFORGE_STATE_DIR, LIVENESS_PLIST_DIR,
+//      LIVENESS_JOBS_CONFIG (default config/jobs.yaml), LIVENESS_LOADED (tests only: comma-separated loaded jobs
+//      instead of asking `launchctl list`).
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import YAML from 'yaml';
 import {
-  parsePlistCadence, evaluateJobs, classifyJob, graceFor, justWoke, issueBody, planIssueSync, CHECKER_JOB, ISSUE_PREFIX,
+  parsePlistCadence, evaluateJobs, classifyJob, graceFor, justWoke, issueBody, planIssueSync, parseLaunchctlList, planWatch,
+  CHECKER_JOB, ISSUE_PREFIX,
 } from './lib/job-liveness.mjs';
 import { readStamp } from './lib/job-heartbeat.mjs';
 
@@ -23,6 +27,7 @@ if (args.some((a) => !['--dry-run', '--self-only'].includes(a))) { console.error
 const env = process.env;
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PLISTS = env.LIVENESS_PLIST_DIR ?? join(REPO_ROOT, 'infra/macos');
+const JOBS_CONFIG = env.LIVENESS_JOBS_CONFIG ?? join(REPO_ROOT, 'config/jobs.yaml');
 const HB_DIR = join(env.APPFORGE_STATE_DIR ?? join(REPO_ROOT, 'state'), 'heartbeats');
 const CTO_ID = env.LIVENESS_ASSIGNEE ?? '3cba1fb3-21e1-4851-832b-95de5247bff1';
 const PROJECT = env.LIVENESS_PROJECT ?? '';
@@ -36,7 +41,8 @@ function notify(msg) {
 }
 const fail = (msg) => { log(`FAIL ${msg}`); notify(`BROKEN: ${msg}`); process.exit(1); };
 
-// Jobs = every LaunchAgent template in the repo; the cadence comes from the plist, not from a second list that can drift.
+// Cadence comes from each committed plist template; WHICH jobs are watched comes from the reviewed list in
+// config/jobs.yaml, so a template that is deliberately not loaded on this host never raises a false alarm.
 let jobs;
 try {
   jobs = readdirSync(PLISTS).filter((f) => /^ing\.paperclip\.appforge-.+\.plist$/.test(f)).map((f) => ({
@@ -58,8 +64,22 @@ if (selfOnly) {
   process.exit(0);
 }
 
+let config;
+try { config = YAML.parse(readFileSync(JOBS_CONFIG, 'utf8')); } catch (e) { fail(`cannot read ${JOBS_CONFIG}: ${e.message}`); }
+let loaded;
+if (env.LIVENESS_LOADED != null) loaded = new Set(env.LIVENESS_LOADED.split(',').map((x) => x.trim()).filter(Boolean));
+else {
+  try { loaded = parseLaunchctlList(execFileSync('launchctl', ['list'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })); }
+  catch (e) { fail(`launchctl list failed, so it is unknown which jobs are loaded: ${e.message}`); }
+}
+const watch = planWatch({ config, templates: new Map(jobs.map((j) => [j.job, j.cadenceSec])), loaded });
+if (watch.errors.length) fail(`config/jobs.yaml does not match the plist templates: ${watch.errors.join('; ')}`);
+
 const woke = justWoke({ prevCheckerSuccess: prevSelf?.lastSuccess ?? null, checkerCadenceSec: self.cadenceSec });
-const results = evaluateJobs({ jobs: jobs.filter((j) => j.job !== CHECKER_JOB), readStamp: (j) => readStamp(HB_DIR, j) });
+const results = [
+  ...watch.notLoaded,
+  ...evaluateJobs({ jobs: watch.jobs.filter((j) => j.job !== CHECKER_JOB), readStamp: (j) => readStamp(HB_DIR, j) }),
+];
 
 // Drift checks folded in (APP-294): exit 0 clean, 1 drift, anything else = the check itself is broken. Never "fine".
 const CHECKS = [

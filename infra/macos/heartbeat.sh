@@ -10,7 +10,9 @@
 HB_DIR="${APPFORGE_STATE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/state}/heartbeats"
 
 hb_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-hb_last_success() { sed -n 's/.*"lastSuccess":"\([^"]*\)".*/\1/p' "$HB_DIR/$1.json" 2>/dev/null | head -1; }
+# Must never fail: under the caller's `set -e` + pipefail, a missing stamp (first run) would otherwise kill the job
+# silently before it did anything (found by scripts/tests/heartbeat-live-scripts.test.mjs, review of PR #72).
+hb_last_success() { [ -f "$HB_DIR/$1.json" ] || return 0; sed -n 's/.*"lastSuccess":"\([^"]*\)".*/\1/p' "$HB_DIR/$1.json" 2>/dev/null | head -1 || true; }
 hb_write() { # job started finished exitCode lastSuccess  ("" = null)
   local f="$HB_DIR/$1.json" q='"'
   mkdir -p "$HB_DIR" 2>/dev/null || { echo "heartbeat: cannot create $HB_DIR" >&2; return 0; }

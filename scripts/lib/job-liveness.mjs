@@ -99,3 +99,42 @@ export function planIssueSync({ findings, healthyKeys, issues }) {
   const close = healthyKeys.map((k) => openByTitle.get(issueTitle(k))).filter(Boolean);
   return { open, keep, close };
 }
+
+/** Job names (label suffixes) of the ing.paperclip.appforge-* agents in `launchctl list` output (PID, status, label). */
+export function parseLaunchctlList(text) {
+  const loaded = new Set();
+  for (const line of String(text).split('\n')) {
+    const m = line.trim().match(/\sing\.paperclip\.appforge-(\S+)$/);
+    if (m) loaded.add(m[1]);
+  }
+  return loaded;
+}
+
+/**
+ * Which jobs to watch, from the reviewed list in config/jobs.yaml (review of PR #72): only `expected` jobs are
+ * watched, so a template that is deliberately not loaded cannot raise a false never-ran alarm. An expected job that
+ * launchd has not loaded is a `not-loaded` finding: that is the point of the check.
+ * `templates`: Map job -> cadenceSec for every committed plist. `loaded`: Set of loaded job names.
+ * `errors` = the config itself is wrong (a template in neither section, in both, or an expected job with no
+ * template); the caller must treat that as broken, never as a quiet pass.
+ */
+export function planWatch({ config, templates, loaded }) {
+  const expected = Array.isArray(config?.expected) ? config.expected : [];
+  const skipped = config?.not_installed && typeof config.not_installed === 'object' ? Object.keys(config.not_installed) : [];
+  const errors = [];
+  if (expected.length === 0) errors.push('config/jobs.yaml lists no expected jobs');
+  for (const j of expected) {
+    if (!templates.has(j)) errors.push(`expected job ${j} has no plist template ing.paperclip.appforge-${j}.plist`);
+    if (skipped.includes(j)) errors.push(`${j} is listed both as expected and as not_installed`);
+  }
+  for (const j of templates.keys()) {
+    if (!expected.includes(j) && !skipped.includes(j)) errors.push(`plist template ${j} is in neither expected nor not_installed in config/jobs.yaml`);
+  }
+  const jobs = []; const notLoaded = [];
+  for (const job of expected) {
+    if (!templates.has(job)) continue;
+    if (loaded.has(job)) jobs.push({ job, cadenceSec: templates.get(job) });
+    else notLoaded.push({ job, state: 'not-loaded', detail: `expected in config/jobs.yaml but launchd has not loaded ing.paperclip.appforge-${job} (install with infra/macos/install-plists.sh ${job}, or move it to not_installed in a reviewed PR)` });
+  }
+  return { jobs, notLoaded, errors };
+}

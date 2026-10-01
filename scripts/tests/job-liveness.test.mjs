@@ -6,7 +6,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, copyF
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parsePlistCadence, classifyJob, evaluateJobs, graceFor, justWoke, planIssueSync, issueTitle } from '../lib/job-liveness.mjs';
+import { parsePlistCadence, classifyJob, evaluateJobs, graceFor, justWoke, planIssueSync, issueTitle, parseLaunchctlList, planWatch } from '../lib/job-liveness.mjs';
+import YAML from 'yaml';
 import { stampStart, stampEnd, readStamp } from '../lib/job-heartbeat.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -159,24 +160,81 @@ async function fakeApi(issues = []) {
   return { calls, url: `http://127.0.0.1:${srv.address().port}`, close: () => srv.close() };
 }
 
-test('checker CLI: missing stamps open ONE issue each and exit 1; a second pass opens no duplicate', async () => {
+const JOBS_CFG = YAML.parse(readFileSync(path.join(REPO, 'config/jobs.yaml'), 'utf8'));
+const TEMPLATES = new Map(readdirSync(MAC).filter((f) => /^ing\.paperclip\.appforge-.+\.plist$/.test(f))
+  .map((f) => [f.replace(/^ing\.paperclip\.appforge-|\.plist$/g, ''), 1]));
+
+test('config/jobs.yaml: every plist template is reviewed into exactly one of expected / not_installed', () => {
+  const r = planWatch({ config: JOBS_CFG, templates: TEMPLATES, loaded: new Set(JOBS_CFG.expected) });
+  assert.deepEqual(r.errors, []);
+  for (const j of ['sync', 'quota-watchdog', 'digest-gate']) assert.ok(j in JOBS_CFG.not_installed, `${j} is deliberately not loaded`);
+  // MUTATION: a new template nobody reviewed, or a job in both sections, is a config error (the checker fails loud).
+  const extra = new Map([...TEMPLATES, ['new-job', 60]]);
+  assert.match(planWatch({ config: JOBS_CFG, templates: extra, loaded: new Set() }).errors.join(), /new-job is in neither/);
+  const both = { ...JOBS_CFG, expected: [...JOBS_CFG.expected, 'sync'] };
+  assert.match(planWatch({ config: both, templates: TEMPLATES, loaded: new Set() }).errors.join(), /sync is listed both/);
+  assert.match(planWatch({ config: { expected: ['ghost'], not_installed: {} }, templates: new Map(), loaded: new Set() }).errors.join(), /ghost has no plist/);
+});
+
+test('planWatch: an unloaded not_installed job is not watched; an expected job that is not loaded is a finding', () => {
+  const loaded = new Set(JOBS_CFG.expected.filter((j) => j !== 'backup'));
+  const r = planWatch({ config: JOBS_CFG, templates: TEMPLATES, loaded });
+  assert.deepEqual(r.jobs.map((j) => j.job).sort(), [...loaded].sort());
+  assert.ok(!r.jobs.some((j) => j.job === 'sync') && !r.notLoaded.some((f) => f.job === 'sync'), 'sync is deliberately not loaded: no finding');
+  assert.deepEqual(r.notLoaded.map((f) => [f.job, f.state]), [['backup', 'not-loaded']]);
+});
+
+test('parseLaunchctlList reads the appforge labels and nothing else', () => {
+  const out = 'PID\tStatus\tLabel\n-\t1\ting.paperclip.appforge-play-vitals\n123\t0\ting.paperclip.appforge-backup\n-\t0\tcom.apple.foo\n-\t0\ting.paperclip.other\n';
+  assert.deepEqual([...parseLaunchctlList(out)].sort(), ['backup', 'play-vitals']);
+});
+
+async function runChecker(env) {
+  const { execFile } = await import('node:child_process');
+  return new Promise((resolve) => execFile(process.execPath, [path.join(REPO, 'scripts/job-liveness.mjs')], { env }, (err, stdout) => resolve({ code: err?.code ?? 0, stdout })));
+}
+function stateWithFreshStamps(except) {
   const state = mkdtempSync(path.join(tmpdir(), 'live-'));
   const hb = path.join(state, 'heartbeats'); mkdirSync(hb, { recursive: true });
   const fresh = new Date().toISOString();
-  for (const j of readdirSync(MAC).filter((f) => f.endsWith('.plist')).map((f) => f.replace(/^ing\.paperclip\.appforge-|\.plist$/g, '')))
-    if (j !== 'backup') writeFileSync(path.join(hb, `${j}.json`), JSON.stringify({ job: j, started: fresh, finished: fresh, exitCode: 0, lastSuccess: fresh }));
+  for (const j of JOBS_CFG.expected) if (!except.includes(j)) writeFileSync(path.join(hb, `${j}.json`), JSON.stringify({ job: j, started: fresh, finished: fresh, exitCode: 0, lastSuccess: fresh }));
+  return state;
+}
+
+test('checker CLI: missing stamps open ONE issue each and exit 1; unloaded not_installed jobs (no stamp) open nothing', async () => {
+  const state = stateWithFreshStamps(['backup']); // and no stamp at all for sync / quota-watchdog / digest-gate
   const api = await fakeApi();
-  const env = { ...process.env, APPFORGE_STATE_DIR: state, PAPERCLIP_API_URL: api.url, PAPERCLIP_COMPANY_ID: 'co', NTFY_TOPIC: '' };
-  const run = () => new Promise((resolve) => import('node:child_process').then(({ execFile }) =>
-    execFile(process.execPath, [path.join(REPO, 'scripts/job-liveness.mjs')], { env }, (err, stdout) => resolve({ code: err?.code ?? 0, stdout }))));
-  const r = await run();
+  const r = await runChecker({ ...process.env, APPFORGE_STATE_DIR: state, PAPERCLIP_API_URL: api.url, PAPERCLIP_COMPANY_ID: 'co', NTFY_TOPIC: '', LIVENESS_LOADED: JOBS_CFG.expected.join(',') });
   api.close();
-  const posts = api.calls.filter((c) => c.method === 'POST');
-  const titles = posts.map((p) => JSON.parse(p.body).title);
+  const titles = api.calls.filter((c) => c.method === 'POST').map((p) => JSON.parse(p.body).title);
   assert.ok(titles.includes(issueTitle('backup')), r.stdout);
   assert.equal(titles.filter((t) => t === issueTitle('backup')).length, 1);
+  for (const j of Object.keys(JOBS_CFG.not_installed)) assert.ok(!titles.includes(issueTitle(j)), `${j} must not raise a finding`);
   assert.match(r.stdout, /never-ran\s+backup/);
+  assert.doesNotMatch(r.stdout, /never-ran\s+(sync|quota-watchdog|digest-gate)/);
   assert.equal(r.code, 1);
+});
+
+test('MUTATION checker CLI: an expected job that launchd has not loaded is reported, even with a fresh stamp', async () => {
+  const state = stateWithFreshStamps([]);
+  const api = await fakeApi();
+  const r = await runChecker({ ...process.env, APPFORGE_STATE_DIR: state, PAPERCLIP_API_URL: api.url, PAPERCLIP_COMPANY_ID: 'co', NTFY_TOPIC: '', LIVENESS_LOADED: JOBS_CFG.expected.filter((j) => j !== 'repo-refresh').join(',') });
+  api.close();
+  const titles = api.calls.filter((c) => c.method === 'POST').map((p) => JSON.parse(p.body).title);
+  assert.deepEqual(titles.filter((t) => t.includes('repo-refresh')), [issueTitle('repo-refresh')], r.stdout);
+  assert.match(r.stdout, /not-loaded\s+repo-refresh/);
+  assert.equal(r.code, 1);
+});
+
+test('MUTATION checker CLI: a config that does not match the templates fails loud and opens nothing', async () => {
+  const cfg = path.join(mkdtempSync(path.join(tmpdir(), 'cfg-')), 'jobs.yaml');
+  writeFileSync(cfg, 'expected: [backup, job-liveness]\nnot_installed: {}\n');
+  const api = await fakeApi();
+  const r = await runChecker({ ...process.env, APPFORGE_STATE_DIR: stateWithFreshStamps([]), PAPERCLIP_API_URL: api.url, PAPERCLIP_COMPANY_ID: 'co', NTFY_TOPIC: '', LIVENESS_LOADED: 'backup,job-liveness', LIVENESS_JOBS_CONFIG: cfg });
+  api.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /FAIL config\/jobs.yaml does not match/);
+  assert.equal(api.calls.length, 0);
 });
 
 test('--self-only: a missing or stale checker stamp exits 1, a fresh one exits 0 (who checks the checker)', () => {

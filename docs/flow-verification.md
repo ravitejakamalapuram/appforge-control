@@ -82,7 +82,7 @@ detection, but not all of the definition of done. **No** = nothing reads the out
 | Rank | Flow | Where | Verifier today | Gap | Status |
 |---|---|---|---|---|---|
 | 1 | Loud path from GitHub to the company | release-platform runs, `listing-verify` issues | A failing run and a GitHub issue in the **app** repo. No Paperclip issue and no ntfy. Nobody here is woken by a GitHub issue. | Without this, every release-platform verifier is "loud" only in a repo nobody watches. **Child issue APP-293.** | **No** |
-| 2 | Schedules: did the job actually run? | launchd: `play-vitals`, `repo-refresh`, `backup`, `digest-gate`, `sync`, `lock-guard`, `quota-watchdog`. Paperclip routines. | `sync.sh` catches missed **Paperclip routine** fires. Nothing checks launchd jobs: a job that never fires (Mac asleep, plist unloaded, node path broken) is silent. The "Hourly platform integrity sweep" routine (lock and launcher drift) is **paused**, so that check is not running either. | **Built in APP-294:** a stamp per job (`state/heartbeats/`), `job-liveness` checker (never-ran / failed / overdue; one issue + ntfy; self-closing), 15 tests incl. mutation tests. Checker watched by the digest gate. See `infra/macos/README.md`. | **Yes** (once installed: `install-plists.sh job-liveness`) |
+| 2 | Schedules: did the job actually run? | launchd: `play-vitals`, `repo-refresh`, `backup`, `digest-gate`, `sync`, `lock-guard`, `quota-watchdog`. Paperclip routines. | `sync.sh` catches missed **Paperclip routine** fires. Nothing checks launchd jobs: a job that never fires (Mac asleep, plist unloaded, node path broken) is silent. The "Hourly platform integrity sweep" routine (lock and launcher drift) is **paused**, so that check is not running either. | **Built in APP-294:** a stamp per job (`state/heartbeats/`), `job-liveness` checker (never-ran / failed / overdue / not-loaded; one issue + ntfy; self-closing). It watches only the reviewed `expected` list in `config/jobs.yaml`, so jobs deliberately not loaded here (`sync`, `quota-watchdog`, `digest-gate`) raise nothing, and an expected job that launchd has not loaded is a finding. Mutation tests include the real `backup.sh` and `repo-refresh.sh` run through the wrapper. The digest gate would watch the checker, but it is not loaded on this host, so only the optional healthchecks ping does. See `infra/macos/README.md`. | **Yes** (once installed: `install-plists.sh job-liveness`) |
 | 3 | Release, then Play track read-back | `release.yml` (`play.mjs upload`) | Trusts the commit response. Nothing re-reads the track to confirm that the versionCode is on the intended track with the intended status. | **Built in APP-295, waiting for a push** (branch `feat/APP-295-track-verify`): `play.mjs verify-track`, a fresh read-only edit after commit, asserting `{track, versionCodes, status, userFraction}`; a mismatch fails the run and blocks the tag. 18 mutation tests. The `release-verify` issue (branch `feat/APP-295-release-verify-issue`) needs callers to grant `issues: write` first. | **Yes** (once pushed) |
 | 4 | Promote / rollout / halt / complete | `promote.yml` (`play.mjs promote`, `changeRollout`) | Same as rank 3. The commit response is trusted. | Same verifier as rank 3 (`verify-track` step in `promote.yml`; status and fraction from the inputs). Built in APP-295, waiting for a push. | **Yes** (once pushed) |
 | 5 | Agent runs: does the artefact the agent claims exist? | every HANDOFF comment | Reviewer spot checks only. A HANDOFF can link a PR, branch, commit or file that does not exist (for example, a push that failed). | A `verify-handoff` check that resolves every PR, commit and path in a HANDOFF and fails `in_review` if one is missing. Next after the top 3. | **No** |
@@ -91,15 +91,20 @@ detection, but not all of the definition of done. **No** = nothing reads the out
 | 8 | Launcher drift | `scripts/detect-launcher-drift.mjs` | Good verifier with tests, but its only schedule (the integrity-sweep routine) is paused. | Now run by `job-liveness` on launchd every 10 min (APP-294). The paused routine stays paused; unpausing needs CTO/board sign-off. | **Yes** (once installed) |
 | 9 | repo-refresh | `infra/macos/repo-refresh.sh` (hourly) | Logs per-repo fetch failures. Readers are told to "say so if the commit looks old". | Rank 2 (done) covers "did it run". Still needs a staleness check: the age of `origin/main` vs. GitHub's `pushed_at`. | **Partial** |
 | 10 | play-vitals | `infra/macos/play-vitals.sh` (daily) | Good: exit 2 ("check failed") sends ntfy, so a broken check is never a quiet day. Not covered: a run that never starts. | Rank 2 (APP-294) now covers "did it run". | **Yes** (once installed) |
-| 11 | Play listing sync | release-platform `listing.yml` | **Built in APP-290, waiting for a push:** an immediate read-back and a daily drift check, 16 tests including 8 mutation tests. | Rank 1 (bridge). Rank 6 (post-review) is built in APP-296. | **Yes** (once pushed) |
+| 11 | Play listing sync | release-platform `listing.yml` | **Built in APP-290, draft release-platform PR #13:** an immediate read-back and a daily drift check, 16 tests including 8 mutation tests. | Rank 1 (bridge). Rank 6 (post-review) is built in APP-296. | **Yes** (once merged) |
 | 12 | Metrics import | `scripts/metrics-import.mjs` + `metrics-freshness.mjs` | Freshness is read back and stale data is flagged. | None found. | **Yes** |
 
 ## 5. Known limits
 
-- **Agents cannot push to `release-platform`.** `config/github-apps.yaml` excludes it on
-  purpose (see `docs/capabilities.md`), pending a locked-down `appforge-release` App. So the
-  release-platform half of this work exists as a local branch that the founder pushes. The same
-  applies to the rank 3 and rank 4 verifiers.
+- **Agents push `release-platform` branches, except workflow files.** Since appforge-control
+  PR #75 the agents' App may push branches and open draft PRs on `release-platform`
+  (`config/github-apps.yaml`). It still has no `workflows` permission, so GitHub refuses any
+  push whose new commits change `.github/workflows/*`. That includes a new branch stacked on a
+  workflow-changing commit that is not yet on `main`, which is why the rank 3, 4 and 6
+  branches were refused (2026-10-01). For those, the agent saves the patch as an issue document and
+  @mentions the board's assistant, who pushes and opens the draft PR (operating rule 8). The
+  founder is never asked to push. Merge and release dispatch stay with the board's assistant
+  and the founder.
 - **A reusable workflow cannot gain a permission silently.** GitHub rejects the whole run at
   startup when a nested job asks for a permission (for example `issues: write`) that the caller
   did not grant. Adding an issue job to a `@v2` workflow breaks every caller. Ship it as a new
