@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PLAY_TIMEZONE, vitalsWindow, buildQuery, metricSetPath, parseRows, assessVitals, isoDate,
+  seriesFor, parseVitalsRun,
 } from '../lib/play-vitals.mjs';
 
 const day = (date, rate, users = 500, metric = 'userPerceivedCrashRate') => {
@@ -97,4 +98,60 @@ test('ANR uses its own threshold', () => {
   const rows = [...['01', '02', '03', '04'].map((d) => day(`2026-09-${d}`, 0.001, 500, 'userPerceivedAnrRate')), day('2026-09-05', 0.006, 500, 'userPerceivedAnrRate')];
   const r = assessVitals(parseRows({ rows }), 'userPerceivedAnrRate');
   assert.equal(r.status, 'alert');
+});
+
+// ---- APP-283: runner output -> manifest reading ------------------------------
+
+const run = (crash, anr, extra = {}) => ({
+  package: 'com.invtracker.inv_tracker',
+  window: { start: '2026-09-15', end: '2026-09-28' },
+  fetched_at: '2026-09-30T20:58:55.935Z',
+  crash: { status: 'insufficient_data', series: crash },
+  anr: { status: 'insufficient_data', series: anr },
+  ...extra,
+});
+const pt = (date, value, users = 40) => ({ date, value, users });
+
+test('seriesFor keeps the value even where the verdict would discard it', () => {
+  const rows = parseRows({ rows: [day('2026-09-27', 0.02, 5), day('2026-09-28', 0.03, 7)] });
+  assert.equal(assessVitals(rows, 'userPerceivedCrashRate').latest, null, 'verdict drops it (<4 days)');
+  assert.deepEqual(seriesFor(rows, 'userPerceivedCrashRate'), [
+    { date: '2026-09-27', value: 0.02, users: 5 },
+    { date: '2026-09-28', value: 0.03, users: 7 },
+  ]);
+});
+
+test('parseVitalsRun takes the newest day BOTH rates carry, never mixing days', () => {
+  const p = parseVitalsRun(run([pt('2026-09-27', 0.01), pt('2026-09-28', 0.02)], [pt('2026-09-27', 0.003)]), { item_id: 'invtrack' });
+  assert.equal(p.source, 'play_developer_reporting_api');
+  assert.equal(p.as_of, '2026-09-27');
+  assert.deepEqual(p.metrics, { play_crash_rate: 0.01, play_anr_rate: 0.003 });
+  assert.equal(p.exported_at, '2026-09-30T20:58:55.935Z', 'dated by the pull, not the load');
+  assert.deepEqual(p.absent_metrics, []);
+});
+
+test('parseVitalsRun records an explicit 0 as 0', () => {
+  const p = parseVitalsRun(run([pt('2026-09-28', 0)], [pt('2026-09-28', 0)]), { item_id: 'invtrack' });
+  assert.deepEqual(p.metrics, { play_crash_rate: 0, play_anr_rate: 0 });
+});
+
+test('parseVitalsRun with no shared day takes the newer rate alone and names the other absent', () => {
+  const p = parseVitalsRun(run([pt('2026-09-28', 0.02)], [pt('2026-09-26', 0.001)]), { item_id: 'invtrack' });
+  assert.equal(p.as_of, '2026-09-28');
+  assert.deepEqual(p.metrics, { play_crash_rate: 0.02 });
+  assert.deepEqual(p.absent_metrics, ['play_anr_rate']);
+});
+
+test('parseVitalsRun refuses an empty window instead of recording zero', () => {
+  assert.throws(() => parseVitalsRun(run([], []), { item_id: 'invtrack' }), /no crash or ANR rows .* 2026-09-15\.\.2026-09-28.*not a rate of zero/);
+});
+
+test('parseVitalsRun refuses a run file from before series were written', () => {
+  const old = { package: 'p.q', fetched_at: '2026-09-30T00:00:00Z', crash: { status: 'insufficient_data', latest: null }, anr: { status: 'insufficient_data', latest: null } };
+  assert.throws(() => parseVitalsRun(old, { item_id: 'invtrack' }), /predates APP-283/);
+});
+
+test('a pre-series run that saw zero rows reads as empty, not as outdated', () => {
+  const old = { package: 'p.q', window: { start: '2026-09-15', end: '2026-09-28' }, fetched_at: '2026-09-30T00:00:00Z', crash: { days: 0 }, anr: { days: 0 } };
+  assert.throws(() => parseVitalsRun(old, { item_id: 'invtrack' }), /no crash or ANR rows/);
 });

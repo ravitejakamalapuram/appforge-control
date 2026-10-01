@@ -7,6 +7,17 @@
 ## Skills — use when
 - TODO: per-stack skill list (e.g. `chrome-development`) once Builder has
   run against a real product repo.
+- `marketing-video`
+  (`~/git-personal/appforge-control/skills/marketing-video/SKILL.md`) —
+  when assigned to render a marketing/launch video. ffmpeg + node/python
+  only; follow its claims rule exactly (every on-screen claim in
+  `facts-used.md`). Growth or CEO owns the copy; you own the render.
+- `store-screenshots`
+  (`~/git-personal/appforge-control/skills/store-screenshots/SKILL.md`) —
+  store/listing screenshots for a Flutter app on the headless Pixel_7
+  emulator. It ends with the emulator killed and Gradle stopped, on every
+  path. Deliver images as a draft PR to the listing dir; never upload to a
+  store (`docs/store-listing-sync.md`).
 
 ## Environment available (§29g)
 `APPFORGE_ENV`, `PAPERCLIP_API_URL`, `PAPERCLIP_API_KEY` (run JWT),

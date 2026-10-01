@@ -113,6 +113,16 @@ const STRING_PLACEHOLDER = '\u0001';
 
 class ScanDesync extends Error {}
 
+/** Shell heredoc openers (`<<EOF`, `<<-EOF`, `<<'EOF'`) and YAML block-scalar indicators (`key: |`, `- >-`). */
+const HASH_UNMODELLED = new RegExp(
+  [
+    String.raw`<<-?\s*['"\\]?[A-Za-z_]`,
+    String.raw`:[ \t]*[|>][+-]?\d*[+-]?[ \t]*(?:#.*)?$`,
+    String.raw`^[ \t]*-[ \t]+[|>][+-]?\d*[+-]?[ \t]*(?:#.*)?$`,
+  ].join('|'),
+  'm',
+);
+
 /** Comment family for a source path, or null when none is known. */
 export function commentFamilyFor(sourcePath) {
   if (typeof sourcePath !== 'string' || sourcePath === '') return null;
@@ -145,6 +155,15 @@ export function scanSource(text, family) {
   const hash = family === 'hash';
   if (!cLike && !hash) throw new ScanDesync(`unknown comment family: ${family}`);
 
+  // Constructs whose BODY is data, not comments: a `#` line inside a shell heredoc or a YAML block
+  // scalar is a line the script writes or the config carries, so stripping it as a comment would report
+  // a real change as "only comments moved". This scanner does not model them, so refuse to classify
+  // (the caller maps that to `unparseable`, i.e. high). The patterns over-match on purpose (a herestring
+  // `<<<` also trips the heredoc one); over-matching only ever makes a verdict stricter, never laxer.
+  if (hash && HASH_UNMODELLED.test(text)) {
+    throw new ScanDesync('the file has a shell heredoc or a YAML block scalar, whose body is data the scanner does not model');
+  }
+
   let code = '';
   let blanked = '';
   let state = 'code';
@@ -163,6 +182,16 @@ export function scanSource(text, family) {
     if (ch === '\n') { blanked += '\n'; lastBlankedWasPlaceholder = false; return; }
     if (!lastBlankedWasPlaceholder) { blanked += STRING_PLACEHOLDER; lastBlankedWasPlaceholder = true; }
   };
+
+  // A shebang is the interpreter line, not a comment: changing `#!/bin/bash` to `#!/bin/sh` changes how
+  // the file runs. Keep the whole first line as code.
+  if (hash && text.startsWith('#!')) {
+    const end = text.indexOf('\n');
+    const first = end === -1 ? text : text.slice(0, end);
+    for (const ch of first) keep(ch);
+    prev = first[first.length - 1];
+    i = first.length;
+  }
 
   while (i < text.length) {
     const ch = text[i];

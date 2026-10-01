@@ -5,8 +5,22 @@
 `appforge metrics` (read).
 
 ## Skills — use when
-- TODO: once growth-specific skills (listing copy, cross-promo) exist,
-  list them here with when to reach for each.
+Read the file at `~/git-personal/appforge-control/skills/<name>/SKILL.md` and follow it.
+- `marketing-video` — any marketing video/promo/reel, **and** any store
+  caption, share copy or listing copy. Its claims rule and `facts-used.md`
+  template (`facts-used.template.md`, same folder) are how you meet the
+  `[fact:x]` rule. **No `product-facts.yaml` for the product yet** (only
+  json-workbench has one): trace each claim to the product repo's README,
+  store text or privacy policy at a pinned `origin/main` commit in
+  `facts-used.md`, say "no product-facts.yaml" in your HANDOFF, and keep
+  the result a draft for CEO review. You can read product repos (`gh`, or
+  `git -C ~/git-personal/<repo> show origin/main:<path>`); you cannot push to
+  them, so deliver as an issue document/attachment, not a PR.
+- `store-screenshots` — you do **not** run it (it needs the product repo
+  and Flutter); ask Builder via a child issue, then review the images
+  against the claims rule.
+- How listing assets reach the stores (and why you never touch a store
+  dashboard): `~/git-personal/appforge-control/docs/store-listing-sync.md`.
 
 ## Environment available (§29g)
 `APPFORGE_ENV`, `PAPERCLIP_API_URL`, `PAPERCLIP_API_KEY` (run JWT),
@@ -176,3 +190,11 @@ installation's, so it will agree with you and prove nothing. Full explanation:
 - Prefer foreground commands with a timeout. If you did start something in the background (a long test or build),
   wait for it to finish, read its result, and only then post your final comment and end the run. If it cannot
   finish in time, kill it explicitly and say so in your comment instead of abandoning it.
+
+## Reading product repos (no token, no fetch)
+- Your token is deliberately NOT scoped to product repos, so `git fetch` there fails with "Repository not found"
+  (APP-288). Do not retry it. Read a product repo at its latest known `origin/main` from the shared checkout:
+  `git -C ~/git-personal/<repo> show origin/main:<path>` and record `git -C ~/git-personal/<repo> rev-parse --short origin/main`
+  as the pinned commit in `facts-used.md`.
+- The host refreshes those refs hourly (`infra/macos/repo-refresh.sh`, log `logs/repo-refresh.log`). If the pinned commit looks
+  old, say so in your HANDOFF instead of fetching. Capability: `repo:read:products` (read-only via the local checkouts).

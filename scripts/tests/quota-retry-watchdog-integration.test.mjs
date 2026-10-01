@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
-import { runOnce } from '../quota-retry-watchdog.mjs';
+import { runOnce, reportPassOutcome } from '../quota-retry-watchdog.mjs';
 import { quotaWaste } from '../lib/session-burn.mjs';
 
 function fakeFetchJson(payload) {
@@ -456,4 +456,354 @@ test('runOnce (dry-run): the resume wake names the agent\'s pause-cancellation c
     !seen.some((s) => s.includes('recovery-actions/resolve')),
     'the daemon must never issue the hand-back write itself -- it holds no credential that can own it',
   );
+});
+
+// ---------------------------------------------------------------------------
+// APP-103 / DEBT-0003: the bounded-pause invariant.
+//
+// The scenario these cover is the one that makes an unmonitored watchdog
+// dangerous: an agent is parked (that is how the workaround preempts
+// Paperclip's scheduler), and the bookkeeping that would get it back out is
+// gone or broken. The normal `pendingActions` path cannot help, because the
+// pending action is exactly what was lost. The sweep must get the agent back
+// anyway, off nothing but "we parked this, and it is long past due".
+// ---------------------------------------------------------------------------
+
+async function seedState(mutate) {
+  const { emptyState } = await import('../lib/quota-retry-watchdog.mjs');
+  const state = emptyState();
+  mutate(state);
+  const { writeFileSync } = await import('node:fs');
+  const stateFile = tmpStateFile();
+  writeFileSync(stateFile, JSON.stringify(state));
+  return stateFile;
+}
+
+const RUN_ARGS = { apiBase: 'http://fake', companyId: 'fake-co', apiKey: null, claudeConfigDir: '/tmp', lookbackMinutes: 180, dryRun: true };
+
+test('bounded pause: an agent parked by the watchdog with its pending resume LOST is force-resumed anyway', async () => {
+  const nowMs = Date.now();
+  // The state a crash mid-write (or a lost/rolled-back state file) leaves
+  // behind: the pause is remembered, the scheduled resume that would undo it
+  // is not. Before APP-103 this agent stayed paused forever.
+  const stateFile = await seedState((state) => {
+    state.pausedAgents['agent-cto'] = {
+      pausedAtMs: nowMs - 3 * 3_600_000,
+      scheduledResumeAtMs: nowMs - 40 * 60_000, // due 40min ago, well past the 10min margin
+      kind: 'quota',
+      runId: 'run-lost',
+    };
+  });
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.equal(Object.keys(finalState.pendingActions).length, 0, 'there was never a pending action to fire');
+  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP force-resuming agent=CTO')), 'the sweep must catch it');
+  assert.ok(logs.some((l) => l.includes('DRY-RUN would run: paperclipai agent resume agent-cto')));
+  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP WAKE agent=CTO')), 'and wake it, so it does not sit idle until its next heartbeat');
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined, 'the claim is released once the resume lands');
+});
+
+test('bounded pause: a not-yet-overdue pause is left alone (fail open, but not trigger-happy)', async () => {
+  const nowMs = Date.now();
+  const stateFile = await seedState((state) => {
+    state.pausedAgents['agent-cto'] = {
+      pausedAtMs: nowMs - 60_000,
+      scheduledResumeAtMs: nowMs + 3 * 3_600_000, // a real quota wait still in progress
+      kind: 'quota',
+      runId: 'run-live',
+    };
+  });
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(!logs.some((l) => l.includes('PAUSE-SWEEP')), 'a legitimate multi-hour quota wait must not be cut short');
+  assert.ok(finalState.pausedAgents['agent-cto'], 'the claim is still held');
+});
+
+test('bounded pause: an overdue claim on an agent that is no longer paused is reconciled, not re-resumed', async () => {
+  const nowMs = Date.now();
+  const stateFile = await seedState((state) => {
+    state.pausedAgents['agent-cto'] = {
+      pausedAtMs: nowMs - 3 * 3_600_000,
+      scheduledResumeAtMs: nowMs - 40 * 60_000,
+      kind: 'quota',
+      runId: 'run-x',
+    };
+  });
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]], // an operator already resumed it
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP agent=CTO is already idle')));
+  assert.ok(!logs.some((l) => l.includes('paperclipai agent resume')), 'no redundant resume call');
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined);
+});
+
+test('bounded pause: a claim on an agent that no longer exists is dropped rather than swept forever', async () => {
+  const nowMs = Date.now();
+  const stateFile = await seedState((state) => {
+    state.pausedAgents['agent-gone'] = {
+      pausedAtMs: nowMs - 20 * 3_600_000,
+      scheduledResumeAtMs: nowMs - 19 * 3_600_000,
+      kind: 'backoff',
+      runId: 'run-z',
+    };
+  });
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(logs.some((l) => l.includes('no longer in the company')));
+  assert.equal(finalState.pausedAgents['agent-gone'], undefined);
+});
+
+test('bounded pause: the watchdog claims the pauses it issues, so a later sweep can undo them', async () => {
+  const nowMs = Date.now();
+  const failedAtIso = new Date(nowMs).toISOString();
+  const runs = [
+    {
+      id: 'run-claim',
+      agentId: 'agent-cto',
+      status: 'failed',
+      errorCode: 'provider_quota',
+      error: formatResetText(nowMs + 2 * 3_600_000),
+      createdAt: failedAtIso,
+      startedAt: failedAtIso,
+      finishedAt: failedAtIso,
+      usageJson: null,
+    },
+  ];
+
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', runs],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile: tmpStateFile() }, { log: () => {} }),
+  );
+
+  const claim = finalState.pausedAgents['agent-cto'];
+  assert.ok(claim, 'pausing an agent must be recorded, or the sweep has nothing to act on');
+  assert.equal(claim.kind, 'quota');
+  assert.equal(claim.runId, 'run-claim');
+  assert.equal(claim.scheduledResumeAtMs, finalState.pendingActions['agent-cto'].scheduledAtMs);
+});
+
+test('bounded pause: a pause the watchdog did NOT issue is never claimed — a founder\'s deliberate pause must not be silently undone', async () => {
+  const nowMs = Date.now();
+  const failedAtIso = new Date(nowMs).toISOString();
+  const runs = [
+    {
+      id: 'run-operator-paused',
+      agentId: 'agent-cto',
+      status: 'failed',
+      errorCode: 'provider_quota',
+      error: formatResetText(nowMs + 2 * 3_600_000),
+      createdAt: failedAtIso,
+      startedAt: failedAtIso,
+      finishedAt: failedAtIso,
+      usageJson: null,
+    },
+  ];
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', runs],
+      // Already paused, and the watchdog's state has no claim on it: this is
+      // an operator pause that happens to coincide with a quota failure.
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile: tmpStateFile() }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(logs.some((l) => l.includes('PAUSE-OWNERSHIP')));
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined, 'the sweep must not take ownership of a pause it did not make');
+});
+
+test('a normal due-fire clears the pause claim, so the sweep has nothing left to do', async () => {
+  const { emptyState, setPendingAction, recordWatchdogPause } = await import('../lib/quota-retry-watchdog.mjs');
+  const state = emptyState();
+  setPendingAction(state, 'agent-cto', { kind: 'quota', runId: 'run-x', scheduledAtMs: 1000, reason: 'resuming after provider_quota reset (watchdog)' });
+  recordWatchdogPause(state, 'agent-cto', { pausedAtMs: 500, scheduledResumeAtMs: 1000, kind: 'quota', runId: 'run-x' });
+
+  const { writeFileSync } = await import('node:fs');
+  const stateFile = tmpStateFile();
+  writeFileSync(stateFile, JSON.stringify(state));
+
+  const logs = [];
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', []],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) }),
+  );
+
+  assert.ok(logs.some((l) => l.includes('RESUME agent=CTO')), 'the ordinary path handles it');
+  assert.ok(!logs.some((l) => l.includes('PAUSE-SWEEP')), 'and the sweep does not fire a second, redundant resume');
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined);
+  assert.equal(finalState.pendingActions['agent-cto'], undefined);
+});
+
+
+// ---------------------------------------------------------------------------
+// APP-103 x APP-181: the force-resume sweep must not regress the task binding.
+// The sweep exists for the case where the pending action was LOST, so the
+// issue it binds the wake to has to come from the pause registry itself.
+// ---------------------------------------------------------------------------
+
+test('APP-181 x APP-103: a quota pause records the interrupted run\'s issue on the pause registry entry', async () => {
+  const nowMs = Date.now();
+  const failedAtIso = new Date(nowMs).toISOString();
+  const issueId = 'b1b2b3b4-1111-4222-8333-444455556666';
+  const finalState = await withFakeFetch(
+    [
+      ['/heartbeat-runs', [{
+        id: 'run-bound', agentId: 'agent-cto', status: 'failed', errorCode: 'provider_quota',
+        error: formatResetText(nowMs + 2 * 3_600_000), createdAt: failedAtIso, startedAt: failedAtIso,
+        finishedAt: failedAtIso, contextSnapshot: { issueId },
+      }]],
+      ['/agents', [{ id: 'agent-cto', name: 'CTO', status: 'idle' }]],
+    ],
+    () => runOnce({ ...RUN_ARGS, stateFile: tmpStateFile() }, { log: () => {} }),
+  );
+  assert.equal(finalState.pausedAgents['agent-cto'].issueId, issueId);
+});
+
+test('APP-181 x APP-103: the force-resume wake is task-bound and carries the collateral note', async () => {
+  const nowMs = Date.now();
+  const issueId = 'c1c2c3c4-1111-4222-8333-444455556666';
+  const stateFile = await seedState((state) => {
+    // Pending action lost; only the registry entry survives.
+    state.pausedAgents['agent-cto'] = {
+      pausedAtMs: nowMs - 3 * 3_600_000,
+      scheduledResumeAtMs: nowMs - 40 * 60_000,
+      kind: 'quota',
+      runId: 'run-lost',
+      issueId,
+    };
+  });
+  const logs = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const payload = url.includes('/heartbeat-runs')
+      ? []
+      : url.includes('/agents')
+        ? [{ id: 'agent-cto', name: 'CTO', status: 'paused' }]
+        : {
+            issues: [{
+              id: 'i-2', identifier: 'APP-998', title: 'collateral', status: 'blocked', assigneeAgentId: 'agent-cto',
+              activeRecoveryAction: {
+                id: 'act-2', status: 'active', cause: 'stranded_assigned_issue', returnOwnerAgentId: 'agent-cto',
+                createdAt: new Date(nowMs).toISOString(),
+                evidence: { latestRunId: 'run-dead', latestRunStatus: 'cancelled', latestRunErrorCode: 'agent_paused' },
+              },
+            }],
+          };
+    return { ok: true, status: 200, json: async () => payload, text: async () => '' };
+  };
+  let finalState;
+  try {
+    finalState = await runOnce({ ...RUN_ARGS, stateFile }, { log: (l) => logs.push(l) });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const wake = logs.find((l) => l.includes('DRY-RUN would run: paperclipai agent wake agent-cto'));
+  assert.ok(wake, 'the sweep must wake the agent');
+  assert.ok(wake.includes(`--payload {"issueId":"${issueId}"}`), `force-resume wake must stay task-bound: ${wake}`);
+  assert.match(wake, /APP-998/, 'and name the pause collateral, same as the due-fire path');
+  assert.ok(logs.some((l) => l.includes('PAUSE-SWEEP WAKE agent=CTO') && l.includes(`issue=${issueId}`)));
+  assert.equal(finalState.pausedAgents['agent-cto'], undefined);
+});
+
+// ---------------------------------------------------------------------------
+// PR #14 review: alert throttling end to end, across separate passes. Each
+// pass is a fresh process, so the throttle only works if its record survives
+// on disk between calls -- which is what these exercise.
+// ---------------------------------------------------------------------------
+
+function recordingFetch() {
+  const calls = [];
+  const fn = async (url, opts) => {
+    calls.push({ url, body: opts?.body });
+    return { ok: true, status: 200 };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+const NOTIFIER = { healthcheckUrl: 'https://hc-ping.com/test-uuid', ntfyTopic: 'test-topic-not-a-real-value', enabled: true };
+const ntfyCalls = (f) => f.calls.filter((c) => c.url.includes('ntfy.sh'));
+
+test('reportPassOutcome: a persistent failure pushes once, not every 90s pass; hc /fail still goes out every pass', async () => {
+  const alertStateFile = join(mkdtempSync(join(tmpdir(), 'watchdog-alert-')), 'alerts.json');
+  const fetchFn = recordingFetch();
+  for (let pass = 0; pass < 40; pass += 1) {
+    await reportPassOutcome(NOTIFIER, { failure: `1 error(s): resume CTO failed (due ${pass}min ago)` }, {
+      alertStateFile, nowMs: 1_000_000 + pass * 90_000, fetchFn, log: () => {},
+    });
+  }
+  assert.equal(ntfyCalls(fetchFn).length, 1, '40 passes (1h) of the same failure is one phone push');
+  assert.equal(fetchFn.calls.filter((c) => c.url.endsWith('/fail')).length, 40);
+
+  // Recovery: one success ping, one recovery push that says what was suppressed.
+  await reportPassOutcome(NOTIFIER, { failure: null }, { alertStateFile, nowMs: 5_000_000, fetchFn, log: () => {} });
+  const pushes = ntfyCalls(fetchFn);
+  assert.equal(pushes.length, 2);
+  assert.match(pushes[1].body, /recovered/);
+  assert.match(pushes[1].body, /39 repeat alert/);
+  assert.ok(fetchFn.calls.some((c) => c.url === 'https://hc-ping.com/test-uuid'), 'healthy pass pings success');
+});
+
+test('reportPassOutcome: an unwritable alert-state file never breaks reporting (fails toward alerting)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'watchdog-alert-'));
+  const fetchFn = recordingFetch();
+  // A directory where the file should be: every read and write of it fails.
+  await assert.doesNotReject(
+    reportPassOutcome(NOTIFIER, { failure: 'x' }, { alertStateFile: dir, nowMs: 1, fetchFn, log: () => {} }),
+  );
+  assert.equal(ntfyCalls(fetchFn).length, 1, 'with no readable record, the failure is treated as new and pushed');
+});
+
+test('saveState: a failed rename removes the .tmp file instead of leaving it behind', async () => {
+  const { mkdirSync, existsSync } = await import('node:fs');
+  // The state-file path is an existing directory: the .tmp write succeeds,
+  // the rename onto a directory fails.
+  const stateFile = join(mkdtempSync(join(tmpdir(), 'watchdog-state-')), 'state.json');
+  mkdirSync(stateFile);
+  await assert.rejects(
+    withFakeFetch(
+      [['/heartbeat-runs', []], ['/agents', []]],
+      () => runOnce({ ...RUN_ARGS, dryRun: false, stateFile }, { log: () => {} }),
+    ),
+  );
+  assert.equal(existsSync(`${stateFile}.tmp`), false, 'a stale .tmp must not be left next to the state file');
 });

@@ -425,6 +425,18 @@ latest day reaches Play's bad-behaviour threshold (user-perceived crash 1.09%, A
 median; with fewer than 100 users on the latest day it says `insufficient_data` and never a false "ok". Only the ingest
 job holds the key; no agent does.
 
+**Import (APP-283):** the run file also carries each rate's daily `series`. The ingest job then runs
+`node scripts/metrics-import.mjs --source play_vitals --item invtrack --file data/metrics/raw/play-vitals-<pkg>-<date>.json`,
+and this writes `play_crash_rate` and `play_anr_rate` (a fraction of distinct users, so 0.0109 = 1.09%) to the manifest. The
+values are written even when the verdict is `insufficient_data`. The user count and the verdict go into `notes`, so a
+reader can see that a rate was taken over only a few users. `as_of` is the newest day that has both rates. If the two
+rates have no day in common, the newer rate is written alone and the other goes into `absent_metrics`. A window with no
+rows fails and writes nothing, because an empty window is not a rate of zero.
+
+**First real pull (2026-09-30T20:58Z, window 2026-09-15..2026-09-28):** the token exchange and both queries succeeded,
+and Play returned **zero rows** for both rates. Nothing has been imported, so both metrics show `missing`. That is the
+correct result: the API is reachable, and Play has no vitals for InvTrack in that window.
+
 ### 4.3 The asymmetry that must not be smoothed over
 
 **Play has no weekly-distinct active figure at all.** Daily active devices

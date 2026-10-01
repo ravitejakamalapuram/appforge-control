@@ -1,0 +1,28 @@
+{
+  "package": "com.invtracker.inv_tracker",
+  "window": { "start": "2026-09-15", "end": "2026-09-28" },
+  "fetched_at": "2026-09-30T20:58:55.935Z",
+  "crash": {
+    "status": "insufficient_data",
+    "metric": "userPerceivedCrashRate",
+    "reasons": ["latest day 2026-09-28 has 42 users, need 100"],
+    "latest": { "date": "2026-09-28", "value": 0.0238, "users": 42 },
+    "days": 3,
+    "series": [
+      { "date": "2026-09-26", "value": 0, "users": 40 },
+      { "date": "2026-09-27", "value": 0.025, "users": 40 },
+      { "date": "2026-09-28", "value": 0.0238, "users": 42 }
+    ]
+  },
+  "anr": {
+    "status": "insufficient_data",
+    "metric": "userPerceivedAnrRate",
+    "reasons": ["only 2 day(s) of data, need 4"],
+    "latest": null,
+    "days": 2,
+    "series": [
+      { "date": "2026-09-27", "value": 0, "users": 40 },
+      { "date": "2026-09-28", "value": 0, "users": 42 }
+    ]
+  }
+}
