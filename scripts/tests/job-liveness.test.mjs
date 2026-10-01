@@ -248,3 +248,12 @@ test('--self-only: a missing or stale checker stamp exits 1, a fresh one exits 0
   writeFileSync(path.join(hb, 'job-liveness.json'), JSON.stringify({ job: 'job-liveness', started: now, finished: now, exitCode: 0, lastSuccess: now }));
   assert.equal(run().status, 0, 'fresh stamp');
 });
+
+// Found on the first scheduled run (2026-10-01): the launcher-drift check failed on an anonymous git fetch of the private repo,
+// and the issue reconciliation died with `spawnSync curl ENOBUFS` on the large issue list. Both made the checker blind.
+test('checker: drift check does not fetch on its own, and curl has a large maxBuffer', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../job-liveness.mjs', import.meta.url), 'utf8');
+  assert.match(src, /detect-launcher-drift\.mjs', args: \['--no-fetch'\]/);
+  assert.match(src, /maxBuffer: 64 \* 1024 \* 1024/);
+});
