@@ -41,6 +41,22 @@
 -->
 <plist version="1.0">
 <dict>
+	<!--
+	  LIVENESS SIGNALLING (APP-103 / DEBT-0003).
+
+	  This is a TEMPLATE (PR #43): install-plists.sh fills each double-underscore
+	  placeholder from the environment or ~/git-personal/.envrc at install time.
+	  No secret value is ever committed here.
+
+	  NTFY_TOPIC below is filled the same way as for the sibling jobs, so the
+	  watchdog pushes a (throttled) alert on a failed pass once reinstalled.
+
+	  HEALTHCHECKS_PING_URL_WATCHDOG is deliberately NOT a placeholder yet:
+	  install-plists.sh refuses to install with an unfilled placeholder, so
+	  adding it before the healthchecks.io check exists would block
+	  reinstalling the watchdog at all. The script skips the ping when it is
+	  absent. Provisioning steps: infra/macos/README.md, quota watchdog section.
+	-->
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
@@ -49,6 +65,8 @@
 		<string>/Users/rkamalapuram</string>
 		<key>CLAUDE_CONFIG_DIR</key>
 		<string>/Users/rkamalapuram/git-personal/appforge-control/.claude-appforge</string>
+		<key>NTFY_TOPIC</key>
+		<string>__NTFY_TOPIC__</string>
 	</dict>
 	<key>WorkingDirectory</key>
 	<string>/Users/rkamalapuram/git-personal/appforge-control</string>

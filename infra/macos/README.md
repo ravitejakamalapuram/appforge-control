@@ -174,7 +174,13 @@ actually runs is documented here instead.
 
   Tests: `scripts/tests/quota-retry-watchdog.test.mjs` (pure logic — reset-
   time parsing incl. day rollover, backoff bounds/jitter/reset-on-success,
-  idempotency) and `scripts/tests/quota-retry-watchdog-integration.test.mjs`
+  idempotency, and the bounded-pause ceilings),
+  `scripts/tests/watchdog-notify.test.mjs` (liveness signalling and alert
+  throttling: what it sends when configured, that it sends *nothing* when
+  not, and that it never throws on any network failure shape),
+  `scripts/tests/quota-retry-watchdog-resilience.test.mjs` (a real failing
+  `paperclipai` binary, no mocks), and
+  `scripts/tests/quota-retry-watchdog-integration.test.mjs`
   (the orchestration script against fake fetch data in `--dry-run`,
   including a fixture-driven demonstration that `session-burn.mjs`'s
   `quotaWaste().retriedWithinResetWindow` metric goes to zero once the
@@ -185,6 +191,103 @@ actually runs is documented here instead.
   resume, wake, and backoff decision — written by the script itself, one
   line per action). `logs/quota-retry-watchdog.{out,err}.log` catch launchd-
   level stdout/stderr (crashes, not routine activity).
+
+  **Liveness signalling (APP-103 / DEBT-0003).** This job was the only
+  LaunchAgent with no liveness signal, and the one where silence costs the
+  most: a silent backup job means a missed backup, but a silent watchdog can
+  mean a *paused agent*, because pausing is how the workaround preempts
+  Paperclip's scheduler. It now follows the `backup.sh` / `sync.sh` pattern —
+  a healthchecks.io ping on a healthy pass, and a `/fail` ping plus an ntfy
+  push on a failed one. A pass counts as failed if it throws *or* if any
+  individual `pause`/`resume`/`wake` call failed, so a `resume` that cannot
+  land raises an alert rather than quietly leaving an agent parked.
+
+  The ntfy push is **throttled**; the `/fail` ping is not. At one pass per
+  90s, an unthrottled persistent failure is ~960 phone pushes a day, and a
+  channel that noisy gets muted. So the push goes out on the first failure,
+  when *what* is failing changes (digits are normalised away, so "due 41min
+  ago" vs "due 42min ago" is the same failure), and otherwise at most once an
+  hour, plus one "recovered" push when a healthy pass ends the streak (it
+  says how many repeats were suppressed). The throttle's record is
+  `state/quota-retry-watchdog-state-alerts.json`, kept apart from the main
+  state file because a pass that throws never reaches `saveState` — and that
+  is the pass that must alert. Losing the record costs at most a duplicate
+  push, never a missed one.
+
+  Two env vars drive it: `HEALTHCHECKS_PING_URL_WATCHDOG` (this job's **own**
+  check — reusing the sync or backup check would let one job's pings mask
+  another's silence) and `NTFY_TOPIC` (shared with the sibling jobs). Either
+  may be absent; the script then skips that half silently and still does its
+  real job, and every pass logs `liveness=on|off` so the state is visible.
+
+  **Provisioning.** The plist is a template like every other job here (see
+  *Secrets never live in the plists in git* below): nothing secret is
+  committed, and `install-plists.sh` fills `__NAME__` placeholders from the
+  environment or `~/git-personal/.envrc` at install time.
+  - `NTFY_TOPIC` is already a placeholder in the template, so failure alerts
+    work as soon as the watchdog is reinstalled:
+    `infra/macos/install-plists.sh quota-watchdog`.
+  - `HEALTHCHECKS_PING_URL_WATCHDOG` is **not** in the template yet, on
+    purpose: `install-plists.sh` refuses to install when a placeholder has no
+    value, so adding it before the check exists would block reinstalling the
+    watchdog at all. Founder step: create a healthchecks.io check for this
+    job (period 90s; grace **10 minutes**, ~6 passes — survives one slow pass
+    or a brief sleep, catches a dead LaunchAgent within the hour), add
+    `export HEALTHCHECKS_PING_URL_WATCHDOG="..."` to `.envrc`, then add the
+    `HEALTHCHECKS_PING_URL_WATCHDOG` / `__HEALTHCHECKS_PING_URL_WATCHDOG__`
+    pair to the template's `EnvironmentVariables` and reinstall. Confirm the
+    next log line says `liveness=on` and the check goes green.
+
+  **The bounded-pause invariant (APP-103 / DEBT-0003).** Monitoring only
+  catches the cases where the script stops running. The complementary case —
+  the script *is* running but has lost track of a pause — is handled inside
+  the script. Alongside `pendingActions` ("when should this agent come
+  back?") the state file keeps `pausedAgents`: a registry of agents this
+  watchdog actually parked and has not yet successfully got back out,
+  including the interrupted run's `issueId`. A pending action is cleared once
+  its resume succeeds; a pause claim the same way, and the sweep below never
+  depends on the pending action still existing.
+
+  Every pass, after the ordinary due-resume loop, a claim is force-resumed
+  when it is more than **10 minutes** past its own scheduled resume, when its
+  scheduled resume is missing/unusable, or when it has been held past an
+  absolute ceiling — **12 hours** for a backoff pause (those are capped at
+  30min, so 12h means the schedule is wrong), **8 days** for a quota pause.
+  The quota ceiling is long because provider resets are: a weekly limit
+  resets days out, and a daily reset that rolled over can be ~24h away. A 12h
+  ceiling there would force-resume the agent into the same limit and re-pause
+  it every 12h. The first ceiling catches a `resume` that keeps failing or a
+  pending action that was lost; the second a schedule never written; the
+  third a schedule that is itself wrong (a mangled parse landing weeks out),
+  which the first cannot catch because it trusts the very number that is
+  wrong.
+
+  The force-resume wake is the same wake as the ordinary path: bound to the
+  interrupted run's issue (`--payload {"issueId"}`, APP-181) so the resumed
+  run can PATCH and comment, and carrying the APP-164 pause-collateral note.
+
+  **Fail open.** A premature resume costs one failed run — the agent wakes,
+  hits the quota again, and the watchdog re-pauses it on the next pass. A
+  missed resume costs an agent indefinitely. When the two are in tension,
+  the sweep resumes.
+
+  Two deliberate limits on the sweep. It only force-resumes pauses the
+  watchdog itself issued: if an agent is already paused when a failure is
+  detected and there is no existing claim, the watchdog schedules the resume
+  but logs `PAUSE-OWNERSHIP` and does not take ownership, because silently
+  undoing a founder's deliberate pause would be worse than the bug being
+  fixed. And if the state file is lost entirely, the registry goes with it —
+  there is then no way to tell a watchdog pause from an operator pause, so
+  that case is covered by liveness signalling, not by the sweep. To narrow
+  that window the state file is written atomically (write `.tmp`, then
+  `rename`; a failed rename removes the `.tmp`), so a crash or a launchd
+  `ExitTimeOut` kill mid-write cannot leave truncated JSON.
+
+  An individual `pause`/`resume`/`wake` failure no longer throws out of the
+  pass. It used to, which skipped every remaining agent *and* `saveState`.
+  Failures are now collected, logged and alerted on, and the pass carries on;
+  a failed pause leaves its run unmarked so the next pass retries it, and a
+  failed resume leaves both the pending action and the pause claim in place.
 
 - **Digest gate / Analyst 06:30 conditional wake (APP-43 / APP-50)** —
   `digest-gate.sh` + `ing.paperclip.appforge-digest-gate.plist` (LaunchAgent
