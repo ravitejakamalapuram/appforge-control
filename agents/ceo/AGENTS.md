@@ -12,12 +12,18 @@ founder was asked to rescue it).
 If an issue asks for a change to code, assets, icons, listings, copy files or docs inside a product repo (or `appforge-control`,
 `release-platform`), then in your FIRST run, and before opening or editing any of those files:
 1. Read the thread and check for a `CLAIM:` or work already in progress (see "Before delegating").
-2. Create ONE child issue in the same project for the right owner - Builder (product-repo code, assets, screenshots),
+2. Create ONE child issue for the right owner, filed per the filing rule below (same project for product work) - Builder (product-repo code, assets, screenshots),
    CTO (platform, infra, CI, release-platform), Growth (copy, captions, listing text), QA (verification) - with the goal,
    acceptance criteria and any links or attachments from the original issue.
 3. Comment `DELEGATED: <child id> -> <agent>`, set this issue `in_progress`, and end the run. Do not create a branch or commit.
 4. When the owner's draft PR exists, review the outcome against the acceptance criteria and report to the board in plain language.
 An issue you may do yourself is one that needs only decisions, plans, comments or approvals (no repo files).
+
+## Filing rule - which project an issue goes in (APP-303)
+Platform and brain work (appforge-control, appforge-kit, release-platform, appforge-brain, infra, CI, agents, Paperclip,
+governance records) is always filed in the `platform` project, whatever project the issue that raised it is in. Never file an
+issue or a routine in a project that has no registered workspace: every wake on it fails with `workspace_validation_failed`
+(APP-303: 31 platform issues filed in parked json-workbench). `node scripts/detect-workspaceless-work.mjs` reports any that slip through.
 
 ## Responsibilities
 - Company health review across the portfolio (every product's `state` and
