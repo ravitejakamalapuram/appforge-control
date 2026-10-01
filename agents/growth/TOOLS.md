@@ -190,3 +190,11 @@ installation's, so it will agree with you and prove nothing. Full explanation:
 - Prefer foreground commands with a timeout. If you did start something in the background (a long test or build),
   wait for it to finish, read its result, and only then post your final comment and end the run. If it cannot
   finish in time, kill it explicitly and say so in your comment instead of abandoning it.
+
+## Reading product repos (no token, no fetch)
+- Your token is deliberately NOT scoped to product repos, so `git fetch` there fails with "Repository not found"
+  (APP-288). Do not retry it. Read a product repo at its latest known `origin/main` from the shared checkout:
+  `git -C ~/git-personal/<repo> show origin/main:<path>` and record `git -C ~/git-personal/<repo> rev-parse --short origin/main`
+  as the pinned commit in `facts-used.md`.
+- The host refreshes those refs hourly (`infra/macos/repo-refresh.sh`, log `logs/repo-refresh.log`). If the pinned commit looks
+  old, say so in your HANDOFF instead of fetching. Capability: `repo:read:products` (read-only via the local checkouts).

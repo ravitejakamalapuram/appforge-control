@@ -169,7 +169,7 @@ agents:
       timer: false
       routines: [weekly-fri-1000]   # experiment status (§5.3/§6.2)
       wakes: [assignment]
-    capabilities: [brain:pr, metrics:read, hubsite:pr]
+    capabilities: [brain:pr, metrics:read, hubsite:pr, "repo:read:products"]
     reports_to: ceo
 
   - name: analyst

@@ -125,6 +125,13 @@ secret access.
 Read public web pages and search results for research. Not a browser session,
 not authenticated, and not a substitute for `browser:e2e`.
 
+## `repo:read:products` — Growth
+
+Read product repositories at their latest known `origin/main`, through the shared local checkouts
+(`git -C ~/git-personal/<repo> show origin/main:<path>`). It carries **no token**: the agent's GitHub token stays
+scoped away from product repos, and the host keeps the refs fresh with `infra/macos/repo-refresh.sh` (hourly). An agent
+with this capability never runs `git fetch` on those repos and never writes to them.
+
 ## `hubsite:pr` — Growth
 
 Propose changes to the marketing hub site by PR.
