@@ -38,6 +38,7 @@ test('the shared rules cover the standing rules the founder has set (so removing
   for (const needle of [
     'Tasks belong to the system', 'CLAIM:', 'Root cause, not patches', 'verification loop',
     'NO merge authority', 'System-shaping decisions', 'No loops, no leftovers', 'LESSON:', 'Stay in scope',
+    'Coding discipline', 'Read back every report', 'not `body`',
   ]) assert.ok(shared.includes(needle), `shared rules lost: ${needle}`);
 });
 
