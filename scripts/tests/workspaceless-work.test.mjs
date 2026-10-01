@@ -14,8 +14,8 @@ const projects = [
   { id: 'p-jwb', name: 'json-workbench', workspaces: [], primaryWorkspace: null },
 ];
 
-test('flags an open issue in a project with no workspace (the APP-303 failure)', () => {
-  const issues = [{ id: 'i1', identifier: 'APP-265', status: 'blocked', projectId: 'p-jwb', title: 't' }];
+test('flags an open, agent-assigned issue in a project with no workspace (the APP-303 failure)', () => {
+  const issues = [{ id: 'i1', identifier: 'APP-265', status: 'blocked', projectId: 'p-jwb', assigneeAgentId: 'ag', title: 't' }];
   const out = findWorkspacelessWork({ projects, issues });
   assert.deepEqual(out.issues.map((i) => i.identifier), ['APP-265']);
   assert.equal(out.issues[0].project, 'json-workbench');
@@ -23,24 +23,33 @@ test('flags an open issue in a project with no workspace (the APP-303 failure)',
 
 test('ignores closed issues, issues in a project with a workspace, and issues with no project', () => {
   const issues = [
-    { id: 'a', identifier: 'APP-1', status: 'done', projectId: 'p-jwb', title: 't' },
-    { id: 'b', identifier: 'APP-2', status: 'cancelled', projectId: 'p-jwb', title: 't' },
-    { id: 'c', identifier: 'APP-3', status: 'todo', projectId: 'p-platform', title: 't' },
-    { id: 'd', identifier: 'APP-4', status: 'todo', projectId: null, title: 't' },
+    { id: 'a', identifier: 'APP-1', status: 'done', projectId: 'p-jwb', assigneeAgentId: 'ag', title: 't' },
+    { id: 'b', identifier: 'APP-2', status: 'cancelled', projectId: 'p-jwb', assigneeAgentId: 'ag', title: 't' },
+    { id: 'c', identifier: 'APP-3', status: 'todo', projectId: 'p-platform', assigneeAgentId: 'ag', title: 't' },
+    { id: 'd', identifier: 'APP-4', status: 'todo', projectId: null, assigneeAgentId: 'ag', title: 't' },
   ];
   assert.deepEqual(findWorkspacelessWork({ projects, issues }).issues, []);
 });
 
 test('backlog counts as open: a backlog issue fails as soon as it is moved to todo and woken', () => {
-  const issues = [{ id: 'a', identifier: 'APP-66', status: 'backlog', projectId: 'p-jwb', title: 't' }];
+  const issues = [{ id: 'a', identifier: 'APP-66', status: 'backlog', projectId: 'p-jwb', assigneeAgentId: 'ag', title: 't' }];
   assert.equal(findWorkspacelessWork({ projects, issues }).issues.length, 1);
 });
 
-test('flags paused routines in a workspace-less project, not archived ones', () => {
+test('parked work is not flagged: an unassigned or user-assigned issue wakes no agent (APP-305)', () => {
+  const issues = [
+    { id: 'a', identifier: 'APP-7', status: 'todo', projectId: 'p-jwb', assigneeAgentId: null, title: 't' },
+    { id: 'b', identifier: 'APP-17', status: 'todo', projectId: 'p-jwb', assigneeUserId: 'founder', title: 't' },
+  ];
+  assert.deepEqual(findWorkspacelessWork({ projects, issues }).issues, []);
+});
+
+test('flags active routines in a workspace-less project, not paused or archived ones (APP-305)', () => {
   const routines = [
-    { id: 'r1', status: 'paused', projectId: 'p-jwb', title: 'Hourly sweep' },
-    { id: 'r2', status: 'archived', projectId: 'p-jwb', title: 'old' },
-    { id: 'r3', status: 'active', projectId: 'p-platform', title: 'fine' },
+    { id: 'r1', status: 'active', projectId: 'p-jwb', title: 'Hourly sweep' },
+    { id: 'r2', status: 'paused', projectId: 'p-jwb', title: 'parked' },
+    { id: 'r3', status: 'archived', projectId: 'p-jwb', title: 'old' },
+    { id: 'r4', status: 'active', projectId: 'p-platform', title: 'fine' },
   ];
   assert.deepEqual(findWorkspacelessWork({ projects, issues: [], routines }).routines.map((r) => r.id), ['r1']);
 });
