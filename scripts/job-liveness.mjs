@@ -34,7 +34,8 @@ const PROJECT = env.LIVENESS_PROJECT ?? '';
 const NODE = process.execPath;
 const log = (m) => console.log(`[${new Date().toISOString()}] job-liveness: ${m}`);
 
-function curl(a, input) { return execFileSync('curl', ['-fsS', '-m', '15', ...a], { input, stdio: ['pipe', 'pipe', 'pipe'] }).toString(); }
+// maxBuffer: the issue list is hundreds of KB; the 1 MB default made `spawnSync curl ENOBUFS` and the checker could not open or close any issue.
+function curl(a, input) { return execFileSync('curl', ['-fsS', '-m', '15', ...a], { input, stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 }).toString(); }
 function notify(msg) {
   if (!env.NTFY_TOPIC || dry) return;
   try { curl(['-H', 'Title: appforge job-liveness', '-d', msg, `https://ntfy.sh/${env.NTFY_TOPIC}`]); } catch { /* best effort */ }
@@ -84,7 +85,8 @@ const results = [
 // Drift checks folded in (APP-294): exit 0 clean, 1 drift, anything else = the check itself is broken. Never "fine".
 const CHECKS = [
   { key: 'instructions-sync', script: 'scripts/sync-agent-instructions.mjs', args: [] },
-  { key: 'launcher-drift', script: 'scripts/detect-launcher-drift.mjs', args: [] },
+  // --no-fetch: job-liveness.sh already fetched origin with a scoped token (fetch_origin); the drift script's own anonymous fetch cannot reach this private repo under launchd.
+  { key: 'launcher-drift', script: 'scripts/detect-launcher-drift.mjs', args: ['--no-fetch'] },
 ];
 for (const c of CHECKS) {
   try {
