@@ -1400,7 +1400,7 @@ products:
   echokit:          { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "first_published unknown" }
   stellartab:       { platform: chrome,  store_item_status: unpublished ,      first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "CWS dashboard 2026-09-30: v1.1.6 REJECTED, never live" }
   session-transfer: { platform: chrome,  store_item_status: published,         first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "CWS dashboard 2026-10-01: Status > Published says 'published and available to the public' (4 users); a newer draft (v1.2.2) is pending review; first_published unknown" }
-  telugupanchangam: { platform: chrome,  store_item_status: unpublished,    first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "awaiting free CWS slot (§13.6)" }
+  telugupanchangam: { platform: chrome,  store_item_status: published,      first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "public CWS page 2026-10-01: v1.2.0 live, 'Updated October 1, 2026' (APP-321); first_published unknown" }
   gitaverses:       { platform: chrome,  store_item_status: unpublished,  first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "CWS dashboard 2026-10-01: Gita Wisdom New Tab is Draft (unpublished by the founder; had 2 users)" }
   cors-enabler:     { platform: chrome,  store_item_status: published   ,          first_published: null, expected_outcome: not_applicable, reason_code: first_published_null, reason: "CWS dashboard 2026-09-30: CORS Enabler Engine is live (3 users); first_published unknown" }
   teleport:         { platform: android, store_item_status: internal_track, first_published: null, expected_outcome: not_applicable, reason_code: not_published, reason: "Play internal track only; CWS target is an unpublished draft" }
@@ -1411,8 +1411,9 @@ portfolio_note: |
   inferred from repo files and four were wrong). Five products are published
   with an unknown launch date (json-workbench, echokit, cors-enabler,
   session-transfer on Chrome; invtrack on Play); StellarTab is rejected;
-  gitaverses is a draft (unpublished by the founder); telugupanchangam is a
-  draft (1.2.0 pending review).
+  gitaverses is a draft (unpublished by the founder). telugupanchangam 1.2.0
+  went live on 2026-10-01 (public page read back, APP-321); its first_published
+  is still unknown.
   The Chrome extension limit reads 5/5 and a request for more was declined for
   low installs, so slots remain a constraint - but so does traffic: the whole
   portfolio has under 20 CWS users. That is a live board matter (APP-37).
