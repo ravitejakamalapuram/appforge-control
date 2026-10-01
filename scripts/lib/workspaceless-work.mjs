@@ -16,6 +16,10 @@
  * project, which is how the hourly integrity sweep's issues ended up in
  * json-workbench.
  *
+ * Only work that can wake an agent is reported (APP-305, board answer): an
+ * issue with an agent assignee, and a routine that is not paused. Parked
+ * product work is unassigned and paused on purpose, and wakes nothing.
+ *
  * Pure functions only. The CLI (`scripts/detect-workspaceless-work.mjs`) does
  * the GETs and the one optional POST.
  */
@@ -34,7 +38,7 @@ function isOpenIssue(issue) {
 }
 
 /**
- * Open issues and non-archived routines whose project has no workspace.
+ * Open agent-assigned issues and active routines whose project has no workspace.
  * An issue or routine with no project is not reported: it does not fall back
  * to a project `_default` path.
  */
@@ -43,11 +47,11 @@ export function findWorkspacelessWork({ projects, issues, routines = [] }) {
   const byIdentifier = (a, b) => String(a.identifier).localeCompare(String(b.identifier), undefined, { numeric: true });
   return {
     issues: (issues ?? [])
-      .filter((i) => isOpenIssue(i) && bare.has(i.projectId))
+      .filter((i) => isOpenIssue(i) && i.assigneeAgentId && bare.has(i.projectId))
       .map((i) => ({ id: i.id, identifier: i.identifier, status: i.status, project: bare.get(i.projectId), title: i.title }))
       .sort(byIdentifier),
     routines: (routines ?? [])
-      .filter((r) => r?.status !== 'archived' && bare.has(r?.projectId))
+      .filter((r) => !['paused', 'archived'].includes(r?.status) && bare.has(r?.projectId))
       .map((r) => ({ id: r.id, status: r.status, project: bare.get(r.projectId), title: r.title })),
   };
 }
@@ -68,9 +72,9 @@ export function resolveFilingTarget(projects, name = 'platform') {
 export function renderReport({ issues, routines }) {
   if (issues.length === 0 && routines.length === 0) return '';
   const lines = [
-    `${issues.length} open issue(s) and ${routines.length} routine(s) are in a project with no workspace.`,
+    `${issues.length} open agent-assigned issue(s) and ${routines.length} active routine(s) are in a project with no workspace.`,
     'A wake on any of them fails with workspace_validation_failed (APP-303).',
-    'Fix: move platform/brain work to the `platform` project; leave parked product work parked, or give its project a workspace (board call).',
+    'Fix: move platform/brain work to the `platform` project; park product work by removing its agent assignee / pausing the routine, or give its project a workspace (board call).',
   ];
   if (issues.length) {
     lines.push('', '| Issue | Status | Project | Title |', '|---|---|---|---|');
