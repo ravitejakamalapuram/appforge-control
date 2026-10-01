@@ -46,3 +46,11 @@ test('shared rules are numbered consecutively after the seven universal rules', 
   const nums = [...shared.matchAll(/^(\d+)\. \*\*/gm)].map((m) => Number(m[1]));
   assert.deepEqual(nums, Array.from({ length: nums.length }, (_, i) => 8 + i));
 });
+
+test('the CEO instructions put the delegate-first triage rule up front (APP-300: the CEO did product work it cannot push)', () => {
+  const text = readFileSync(join(ROOT, 'agents', 'ceo', 'AGENTS.md'), 'utf8');
+  for (const needle of ['Triage rule - read this FIRST', 'NEVER change files in a product repo', 'DELEGATED:', 'Builder (product-repo code, assets, screenshots)']) {
+    assert.ok(text.includes(needle), `ceo/AGENTS.md lost: ${needle}`);
+  }
+  assert.ok(text.indexOf('Triage rule - read this FIRST') < text.indexOf('## Responsibilities'), 'the triage rule must come before the responsibilities list');
+});
