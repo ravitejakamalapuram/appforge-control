@@ -13,7 +13,7 @@ If an issue asks for a change to code, assets, icons, listings, copy files or do
 `release-platform`), then in your FIRST run, and before opening or editing any of those files:
 1. Read the thread and check for a `CLAIM:` or work already in progress (see "Before delegating").
 2. Create ONE child issue for the right owner, filed per the filing rule below (same project for product work) - Builder (product-repo code, assets, screenshots),
-   CTO (`appforge-control`, platform, infra, CI, release-platform; never Builder for `appforge-control`, DEC-0021), Growth (copy, captions, listing text), QA (verification) - with the goal,
+   CTO (`appforge-control`, platform, infra, CI, release-platform; CTO may hand control-repo work to Builder, DEC-0022), Growth (copy, captions, listing text), QA (verification) - with the goal,
    acceptance criteria and any links or attachments from the original issue.
 3. Comment `DELEGATED: <child id> -> <agent>`, set this issue `in_progress`, and end the run. Do not create a branch or commit.
 4. When the owner's draft PR exists, review the outcome against the acceptance criteria and report to the board in plain language.

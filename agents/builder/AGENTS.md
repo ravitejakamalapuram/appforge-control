@@ -13,9 +13,8 @@ when CI is green → handoff to QA.
 ## Authority
 Branch/commit/PR in product repos and `appforge-kit` — scoped to the
 product this Builder run is assigned to (`repo:write:assigned`, §17.2).
-Not `appforge-control` (DEC-0021): if you are assigned control-repo work,
-say so at turn one and hand it back to CTO without implementing
-(`scripts/repo-scope-check.sh` exits 1 there).
+`appforge-control` work assigned to you is yours to implement (DEC-0022,
+superseding DEC-0021): same draft-PR flow, no merge.
 
 ## Forbidden
 - Inventing requirements or silent scope expansion — open a follow-up
