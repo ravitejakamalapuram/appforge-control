@@ -138,3 +138,39 @@ test('a failed check does not attempt an import', () => {
   run(f.env);
   assert.equal(existsSync(f.importArgs), false);
 });
+
+/** A git wrapper on PATH that refuses `fetch` unless the scoped-token header is present, like a private GitHub repo. */
+function privateOrigin(f, minterScript) {
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const gbin = join(f.root, 'gbin'); mkdirSync(gbin);
+  const want = `AUTHORIZATION: basic ${Buffer.from('x-access-token:SECRET-TOKEN-VALUE').toString('base64')}`;
+  writeFileSync(join(gbin, 'git'), `#!/bin/sh
+for a in "$@"; do if [ "$a" = fetch ] && [ "\${GIT_CONFIG_VALUE_0:-}" != "${want}" ]; then echo "remote: Repository not found." >&2; exit 128; fi; done
+exec "${realGit}" "$@"\n`);
+  chmodSync(join(gbin, 'git'), 0o755);
+  const argsLog = join(f.root, 'minter.args');
+  const minter = join(f.root, 'minter.sh');
+  writeFileSync(minter, minterScript(argsLog));
+  chmodSync(minter, 0o755);
+  return { env: { ...f.env, PATH: `${gbin}:${f.env.PATH}`, FETCH_ORIGIN_TOKEN_CMD: minter }, argsLog };
+}
+
+test('a private origin is fetched with a repo-scoped token and the check runs; the token is never printed', () => {
+  const f = fixture({ stubExit: 3, stubJson: { window: { end: '2026-09-28' } } });
+  const p = privateOrigin(f, (log) => `#!/bin/sh\necho "$@" >> "${log}"\necho '{"token":"SECRET-TOKEN-VALUE"}'\n`);
+  const r = run(p.env);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /insufficient_data com.example.app/, 'the check ran past the fetch');
+  assert.equal(readFileSync(p.argsLog, 'utf8').trim(), '--repos origin', 'the token is scoped to exactly this repo');
+  assert.ok(!(r.stdout + r.stderr).includes('SECRET-TOKEN-VALUE'), 'the token must never appear in output');
+});
+
+test('a private origin with no usable token fails loudly: the check did not run', () => {
+  const f = fixture({ stubExit: 0, stubJson: {} });
+  const p = privateOrigin(f, () => '#!/bin/sh\nexit 1\n');
+  const r = run(p.env);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /FAIL git fetch/);
+  assert.match(readFileSync(f.posts, 'utf8'), /ntfy\.sh/);
+  assert.equal(existsSync(f.importArgs), false, 'nothing ran');
+});

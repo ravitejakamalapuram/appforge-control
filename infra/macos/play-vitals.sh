@@ -50,7 +50,9 @@ if [ "$DRY_RUN" = "0" ]; then
 fi
 
 cd "$REPO" || { log "FAIL cannot cd $REPO"; notify "check did not run: cannot cd $REPO"; exit 1; }
-git -C "$REPO" fetch origin --quiet || { log "FAIL git fetch"; notify "check did not run: git fetch failed"; exit 1; }
+# shellcheck source=lib/fetch-origin.sh
+. "$(dirname "$0")/lib/fetch-origin.sh"
+fetch_origin "$REPO" || { log "FAIL git fetch (anonymous and scoped-token)"; notify "check did not run: git fetch failed"; exit 1; }
 
 WT="$(mktemp -d "${TMPDIR:-/tmp}/appforge-play-vitals.XXXXXX")/afc"
 cleanup() { git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1 || true; rm -rf "$(dirname "$WT")" >/dev/null 2>&1 || true; }
