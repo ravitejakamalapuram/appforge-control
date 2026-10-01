@@ -89,3 +89,13 @@ test('a private origin with no usable token fails loudly: the gate did not run',
   assert.match(posts, /ntfy\.sh/);
   assert.doesNotMatch(posts, /\/api\/routines\//, 'Analyst was not woken');
 });
+
+// APP-314: the header contract says 20 is a silent success. A non-zero exit here would make launchd record a failure
+// every quiet day, so a broken gate and a quiet one would look the same in `launchctl print`.
+test('a quiet day (gate exit 20) exits 0 and posts nothing', () => {
+  const f = fixture({ gateExit: 20 });
+  const r = run(f.env);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /quiet stub digest/);
+  assert.equal(existsSync(f.posts), false, 'no routine POST and no ntfy page');
+});
