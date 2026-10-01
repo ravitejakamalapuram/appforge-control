@@ -8,6 +8,8 @@
 #
 #   merge-worker.sh [--dry-run]     # dry-run: print each decision; no merge, no comment, no state write
 set -uo pipefail
+# APP-294: stamp state/heartbeats/merge-worker.json so a missed or failed run is detected.
+. "$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"; hb_wrap merge-worker "$@"
 
 DRY=()
 case "${1:-}" in

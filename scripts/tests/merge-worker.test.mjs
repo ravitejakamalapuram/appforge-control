@@ -42,7 +42,7 @@ function fakePaperclip(comments) {
   };
 }
 
-function fakeGithub({ repo = 'session-transfer', pr = {}, files = [{ filename: 'product-facts.yaml' }], checks = 'success', mergeResult, afterMerge } = {}) {
+function fakeGithub({ repo = 'session-transfer', pr = {}, files = [{ filename: 'product-facts.yaml' }], checks = 'success', checkApp = 'github-actions', mergeResult, afterMerge } = {}) {
   const writes = [];
   const basePr = {
     state: 'open',
@@ -62,8 +62,7 @@ function fakeGithub({ repo = 'session-transfer', pr = {}, files = [{ filename: '
     getPullRequest: async () => (merged ? { ...basePr, state: 'closed', merged: true, merge_commit_sha: 'c'.repeat(40), ...afterMerge } : basePr),
     listFiles: async () => files,
     listCheckRuns: async (_o, _r, sha, name) =>
-      checks === 'none' ? [] : [{ name, head_sha: sha, status: checks === 'pending' ? 'in_progress' : 'completed', conclusion: checks === 'pending' ? null : checks }],
-    markReady: async (id) => writes.push(['markReady', id]),
+      checks === 'none' ? [] : [{ name, head_sha: sha, app: { slug: checkApp }, status: checks === 'pending' ? 'in_progress' : 'completed', conclusion: checks === 'pending' ? null : checks }],
     merge: async (o, r, n, opts) => {
       writes.push(['merge', r, n, opts]);
       if (mergeResult) return mergeResult;
@@ -93,10 +92,9 @@ function assertRefused(r, pattern) {
 // --- the one case that merges ---
 
 test('all conditions met: merges with the approved sha, reads back, posts MERGED once', async () => {
-  const r = await pass({ github: fakeGithub({ pr: { draft: true } }) });
+  const r = await pass();
   assert.equal(r.results[0].outcome, 'merged', JSON.stringify(r.results[0]));
-  assert.deepEqual(r.github.writes[0], ['markReady', 'PR_1']);
-  assert.deepEqual(r.github.writes[1], ['merge', 'session-transfer', 17, { sha: SHA, method: 'squash' }]);
+  assert.deepEqual(r.github.writes[0], ['merge', 'session-transfer', 17, { sha: SHA, method: 'squash' }]);
   assert.match(r.paperclip.posted[0].body, new RegExp(`^MERGED ${URL} as c{40}`));
   // Second pass: the decision is handled, nothing happens again.
   const again = await pass({ state: r.state });
@@ -151,7 +149,7 @@ test('missing or pending CI waits, then REFUSES once the wait limit passes', asy
     assert.equal(r.results[0].outcome, 'waiting');
     assert.equal(r.paperclip.posted.length, 0);
     assert.ok(r.state.pending['c1:0'], 'kept pending');
-    const late = await pass({ comments: [], github: fakeGithub({ checks }), state: r.state, nowMs: Date.parse('2026-10-01T07:55:00Z') + WAIT_LIMIT_MS + 60_000 });
+    const late = await pass({ comments: [comment()], github: fakeGithub({ checks }), state: r.state, nowMs: Date.parse('2026-10-01T07:55:00Z') + WAIT_LIMIT_MS + 60_000 });
     assertRefused(late, /still not ready/);
   }
 });
@@ -219,7 +217,7 @@ test('REFUSE: CEO approval without a full SHA', async () => {
 
 test('dry-run makes no write call, posts nothing, and leaves state untouched', async () => {
   const state = emptyState();
-  const r = await pass({ dryRun: true, state, github: fakeGithub({ pr: { draft: true } }) });
+  const r = await pass({ dryRun: true, state, github: fakeGithub() });
   assert.equal(r.results[0].outcome, 'would_merge');
   assert.equal(r.github.writes.length, 0);
   assert.equal(r.paperclip.posted.length, 0);
@@ -247,8 +245,8 @@ test('globs: ** crosses directories, * does not, matching ignores case', () => {
 });
 
 test('policy: deny covers every path the board named; allow is exactly phase 1', () => {
-  assert.deepEqual(POLICY.allow, ['**/product-facts.yaml', 'data/**/*.yaml', 'docs/**']);
-  for (const p of ['agents/x.md', 'scripts/tests/a.mjs', 'docs/containment-model.md', 'docs/capabilities.md', 'docs/agent-repo-scope.md', 'docs/merge-gate.md', 'config/merge-policy.yaml']) {
+  assert.deepEqual(POLICY.allow, ['product-facts.yaml', 'data/**/*.yaml', 'docs/**/*.md']);
+  for (const p of ['agents/x.md', 'scripts/tests/a.mjs', 'docs/containment-model.md', 'docs/capabilities.md', 'docs/agent-repo-scope.md', 'docs/merge-gate.md', 'docs/git-credentials-in-agent-runs.md', 'docs/paperclip-run-binding.md', 'docs/runtime-launcher.md', 'docs/metrics-ingest.md', 'docs/store-listing-sync.md', 'config/merge-policy.yaml', 'x/agents/y.md', 'x/config/z.yaml']) {
     assert.match(pathProblems([{ filename: p }], POLICY)[0], /deny list/, p);
   }
   assert.deepEqual(Object.keys(POLICY.repos).sort(), ['appforge-control', 'session-transfer']);
@@ -263,4 +261,68 @@ test('policy loader refuses a repo with no required check', () => {
 
 test('extractApprovals ignores a deleted CEO comment', () => {
   assert.deepEqual(extractApprovals({ ...comment(), deletedAt: '2026-10-01T07:56:00Z' }, POLICY), []);
+});
+
+
+// --- security review of PR #85 (2026-10-01) ---
+
+test('REFUSE: a draft PR is never undrafted by the worker', async () => {
+  const r = await pass({ github: fakeGithub({ pr: { draft: true } }) });
+  assertRefused(r, /draft/);
+  assert.ok(!r.github.writes.some((w) => w[0] === 'markReady'), 'never marks ready');
+});
+
+test('REFUSE: a green check posted by another App does not count', async () => {
+  const r = await pass({ github: fakeGithub({ checkApp: 'some-other-app' }) });
+  assert.equal(r.results[0].outcome, 'waiting', 'an untrusted run is the same as no run');
+  assert.ok(!r.github.writes.some((w) => w[0] === 'merge'));
+});
+
+test('REFUSE: a check run with no head_sha does not count', async () => {
+  const gh = fakeGithub();
+  gh.listCheckRuns = async (_o, _r, _sha, name) => [{ name, app: { slug: 'github-actions' }, status: 'completed', conclusion: 'success' }];
+  const r = await pass({ github: gh });
+  assert.equal(r.results[0].outcome, 'waiting');
+  assert.ok(!gh.writes.some((w) => w[0] === 'merge'));
+});
+
+test('REFUSE: nested look-alike paths and non-markdown docs', () => {
+  for (const p of ['scripts/lib/product-facts.yaml', 'docs/foo.sh', 'docs/a/b.yaml', 'x/agents/y.md', 'x/config/z.yaml', 'docs/git-credentials-in-agent-runs.md']) {
+    assert.ok(pathProblems([{ filename: p }], POLICY).length > 0, p);
+  }
+  for (const p of ['product-facts.yaml', 'docs/notes.md', 'docs/sub/dir/notes.md', 'data/x/y.yaml']) {
+    assert.deepEqual(pathProblems([{ filename: p }], POLICY), [], p);
+  }
+});
+
+test('the merge call carries the approved sha and the policy method', async () => {
+  const r = await pass();
+  const merge = r.github.writes.find((w) => w[0] === 'merge');
+  assert.equal(merge[3].sha, SHA);
+  assert.equal(merge[3].method, 'squash');
+});
+
+test('exactly 300 files is judged, 301 is refused', async () => {
+  const mk = (n) => Array.from({ length: n }, (_, i) => ({ filename: `docs/n${i}.md` }));
+  assert.equal((await pass({ github: fakeGithub({ files: mk(300) }) })).results[0].outcome, 'merged');
+  assertRefused(await pass({ github: fakeGithub({ files: mk(301) }) }), /more than 300/);
+});
+
+test('a pending approval whose comment was deleted or edited never merges', async () => {
+  const waiting = await pass({ github: fakeGithub({ checks: 'pending' }) });
+  assert.ok(waiting.state.pending['c1:0']);
+  for (const live of [[], [{ ...comment(), deletedAt: '2026-10-01T07:58:00Z' }], [comment({ body: 'DECISION: approve merge of https://github.com/ravitejakamalapuram/session-transfer/pull/99 at ' + SHA })]]) {
+    const gh = fakeGithub();
+    const r = await runPass({ policy: POLICY, paperclip: { ...fakePaperclip(live), listIssuesUpdatedSince: async () => [] }, github: gh, state: waiting.state, nowMs: NOW, dryRun: false });
+    assert.equal(r.results[0].outcome, 'revoked');
+    assert.ok(!gh.writes.some((w) => w[0] === 'merge'), 'no merge');
+    assert.equal(Object.keys(r.state.pending).length, 0);
+  }
+});
+
+test('a handled decision is not acted on twice', async () => {
+  const first = await pass();
+  assert.equal(first.results[0].outcome, 'merged');
+  const again = await pass({ github: fakeGithub(), state: first.state });
+  assert.equal(again.results.length, 0);
 });

@@ -122,7 +122,7 @@ export function extractApprovals(comment, policy) {
     .map((line) => line.trim())
     .forEach((line, index) => {
       if (!DECISION_PREFIX.test(line)) return;
-      const base = { key: `${comment.id}:${index}`, commentId: comment.id, issueId: comment.issueId, createdAt: comment.createdAt };
+      const base = { key: `${comment.id}:${index}`, commentId: comment.id, issueId: comment.issueId, createdAt: comment.createdAt, line };
       const m = DECISION_STRICT.exec(line);
       if (!m) {
         out.push({
@@ -146,6 +146,8 @@ export function evaluatePullRequest({ approval, pr, files, checkRunsByName, poli
   const repoPolicy = repoPolicyFor(policy, approval.repo);
   if (!repoPolicy) return refuse(`repo ${approval.repo} is not in config/merge-policy.yaml; the board's assistant merges it.`);
   if (pr.state !== 'open') return refuse(`PR is ${pr.merged ? 'already merged' : pr.state}.`);
+  // A draft is not finished (draft-until-finished rule): the author marks it ready; the worker never undrafts.
+  if (pr.draft) return refuse('PR is a draft; the author must mark it ready for review first.');
   if (pr.user?.login !== policy.app_author || pr.user?.type !== 'Bot') {
     return refuse(`author is ${pr.user?.login ?? 'unknown'}, not ${policy.app_author}; only App-authored PRs are auto-merged.`);
   }
@@ -169,7 +171,9 @@ export function evaluatePullRequest({ approval, pr, files, checkRunsByName, poli
 
   const waits = [];
   for (const checkName of repoPolicy.required_checks) {
-    const verdict = evaluateCheckRuns({ checkRuns: checkRunsByName[checkName] ?? [], checkName, headSha: approval.sha, prNumber: approval.number });
+    // Only GitHub Actions runs on THIS commit count: another App with checks:write could post a green run of the same name.
+    const trusted = (checkRunsByName[checkName] ?? []).filter((run) => run?.app?.slug === 'github-actions' && run?.head_sha === approval.sha);
+    const verdict = evaluateCheckRuns({ checkRuns: trusted, checkName, headSha: approval.sha, prNumber: approval.number });
     if (verdict.exitCode === EXIT.CHECK_FAILED) return refuse(verdict.reason.replace(/^REFUSE: /, ''));
     if (verdict.exitCode !== EXIT.GREEN) waits.push(verdict.reason.replace(/^REFUSE: /, ''));
   }
@@ -194,7 +198,7 @@ export function emptyState() {
  * In dry-run nothing is written anywhere and the returned state must not be saved.
  *
  * paperclip: { listIssuesUpdatedSince(iso), listComments(issueId), postComment(issueId, body) }
- * github:    { getPullRequest, listFiles, listCheckRuns, markReady, merge, getCommit, compare }
+ * github:    { getPullRequest, listFiles, listCheckRuns, merge, getCommit, compare }
  */
 export async function runPass({ policy, paperclip, github, state: prev, nowMs, dryRun = false, log = () => {} }) {
   const state = { cursor: prev.cursor, handled: { ...prev.handled }, pending: { ...prev.pending } };
@@ -202,7 +206,21 @@ export async function runPass({ policy, paperclip, github, state: prev, nowMs, d
   // are the board's assistant's to merge; the worker must not answer old threads.
   const sinceMs = state.cursor ? Date.parse(state.cursor) - CURSOR_OVERLAP_MS : nowMs;
 
-  const approvals = new Map(Object.entries(state.pending));
+  const approvals = new Map();
+  // A pending approval is re-read from Paperclip first: a comment that was deleted or edited since the CEO wrote it
+  // is no longer a decision, and must not merge later.
+  const revoked = [];
+  const commentsByIssue = new Map();
+  for (const [key, a] of Object.entries(state.pending)) {
+    if (!commentsByIssue.has(a.issueId)) commentsByIssue.set(a.issueId, await paperclip.listComments(a.issueId));
+    const live = commentsByIssue.get(a.issueId).find((c) => c.id === a.commentId);
+    const stillThere = live && !live.deletedAt && String(live.body ?? '').split(/\r?\n/).some((l) => l.trim() === a.line);
+    if (stillThere) approvals.set(key, a);
+    else {
+      delete state.pending[key];
+      revoked.push({ key, issueId: a.issueId, url: a.url, outcome: 'revoked', reason: 'the approval comment was deleted or changed after the CEO wrote it' });
+    }
+  }
   const issues = await paperclip.listIssuesUpdatedSince(new Date(sinceMs).toISOString());
   for (const issue of issues) {
     for (const comment of await paperclip.listComments(issue.id)) {
@@ -212,7 +230,7 @@ export async function runPass({ policy, paperclip, github, state: prev, nowMs, d
     }
   }
 
-  const results = [];
+  const results = [...revoked];
   const ordered = [...approvals.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   for (const approval of ordered) {
     let result;
@@ -269,10 +287,6 @@ async function handleApproval({ approval, policy, github, nowMs, dryRun, log }) 
   if (verdict.action === 'wait') return { outcome: 'waiting', reason: verdict.reason };
   if (dryRun) return { outcome: 'would_merge', reason: `${files.length} file(s), checks green on ${approval.sha.slice(0, 7)}` };
 
-  if (pr.draft) {
-    log(`marking ${approval.url} ready for review`);
-    await github.markReady(pr.node_id);
-  }
   const merged = await github.merge(OWNER, approval.repo, approval.number, { sha: approval.sha, method: policy.merge_method });
   if (!merged.ok) return { outcome: 'refused', reason: `GitHub refused the merge (HTTP ${merged.status}): ${merged.message}` };
 
@@ -375,13 +389,6 @@ export function createGithubWriteClient({ token, fetchImpl = fetch, apiBase = 'h
     async listCheckRuns(owner, repo, sha, checkName) {
       const payload = await get(`/repos/${owner}/${repo}/commits/${sha}/check-runs?check_name=${encodeURIComponent(checkName)}&per_page=100`);
       return Array.isArray(payload?.check_runs) ? payload.check_runs : [];
-    },
-    async markReady(nodeId) {
-      const r = await raw('POST', '/graphql', {
-        query: 'mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } } }',
-        variables: { id: nodeId },
-      });
-      if (!r.ok || r.json?.errors) throw new Error(`markPullRequestReadyForReview failed: ${r.status} ${r.text.slice(0, 200)}`);
     },
     async merge(owner, repo, n, { sha, method }) {
       const r = await raw('PUT', `/repos/${owner}/${repo}/pulls/${n}/merge`, { sha, merge_method: method });

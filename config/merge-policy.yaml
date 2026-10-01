@@ -27,13 +27,15 @@ repos:
     base: main
     required_checks: ["ci / Validate and test"]
 allow: # every changed file must match one of these
-  - "**/product-facts.yaml"
+  - "product-facts.yaml" # repo root only; a nested copy is not a product-facts file
   - "data/**/*.yaml"
-  - "docs/**"
+  - "docs/**/*.md" # markdown only: agents read docs/ as instructions, so non-markdown files and runbooks are not auto-merged
 deny: # any match refuses, even if allowed above
   - ".github/**"
   - "**/release.yaml"
   - "config/**"
+  - "**/config/**" # nested too (the root-anchored entries above miss x/config/y)
+  - "**/agents/**"
   - "**/*secret*"
   - "**/*.pem"
   - "**/store/**"
@@ -44,3 +46,9 @@ deny: # any match refuses, even if allowed above
   - "docs/capabilities.md"
   - "docs/agent-repo-scope.md"
   - "docs/merge-gate.md"
+  # Agent-read runbooks: an auto-merged edit here is a prompt-injection path (security review of PR #85).
+  - "docs/git-credentials-in-agent-runs.md"
+  - "docs/paperclip-run-binding.md"
+  - "docs/runtime-launcher.md"
+  - "docs/metrics-ingest.md"
+  - "docs/store-listing-sync.md"
