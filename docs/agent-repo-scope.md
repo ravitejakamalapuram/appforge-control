@@ -64,6 +64,9 @@ if your repo is out of scope, escalate, and let it be checked once.
 Measured this way on 2026-09-30 (APP-251), the installation selection is
 **12 repos** and includes `appforge-control`, `appforge-brain` and `InvTrack`.
 `config/github-apps.yaml` records 11 under `installed_on`.
+On 2026-10-01 the founder added `release-platform` to the installation
+(branches and draft PRs only; see `config/github-apps.yaml`). That was not
+re-measured with the App JWT.
 
 ## What the failure actually looks like
 
@@ -108,12 +111,16 @@ What you must not do is implement first and discover the wall at push time.
 The work is not wasted because the scope is narrow; it is wasted because the
 scope was checked last instead of first.
 
-## Standing policy: `appforge-control` is CTO/CEO-only
+## Standing policy: CTO and Builder cover every repo
 
-`appforge-control` is deliberately out of Builder's `APPFORGE_AGENT_REPOS`
-(DEC-0021, founder decision on APP-251). Control-repo work is routed to CTO,
-not Builder. A Builder assigned one anyway follows the steps above and hands
-it back to CTO; it does not ask for its scope to be widened.
+Since 2026-10-01 the founder has set CTO's and Builder's
+`APPFORGE_AGENT_REPOS` to every company repo, `appforge-control`,
+`InvTrack` and `release-platform` included (DEC-0022, which supersedes
+DEC-0021's "`appforge-control` is CTO/CEO-only"). Builder implements
+control-repo work assigned to it. Wider scope does not change the rest:
+draft PRs only, no merge, `.github/workflows/**` through the board's
+assistant. Other agents keep narrower lists, so the turn-one check above
+still applies to them.
 
 ## Related
 
