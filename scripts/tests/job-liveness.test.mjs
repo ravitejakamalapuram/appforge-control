@@ -18,7 +18,7 @@ const ago = (sec) => new Date(NOW - sec * 1000).toISOString();
 const okStamp = (sec) => ({ job: 'x', started: ago(sec + 5), finished: ago(sec), exitCode: 0, lastSuccess: ago(sec) });
 
 test('cadence is read from every committed plist (StartInterval and StartCalendarInterval)', () => {
-  const want = { 'play-vitals': 86400, 'repo-refresh': 3600, backup: 86400, 'digest-gate': 86400, sync: 1800, 'lock-guard': 60, 'quota-watchdog': 90, 'release-bridge': 3600, 'job-liveness': 600 };
+  const want = { 'play-vitals': 86400, 'repo-refresh': 300, backup: 86400, 'digest-gate': 86400, sync: 1800, 'lock-guard': 60, 'quota-watchdog': 90, 'release-bridge': 3600, 'job-liveness': 600 };
   for (const [job, sec] of Object.entries(want)) {
     assert.equal(parsePlistCadence(readFileSync(path.join(MAC, `ing.paperclip.appforge-${job}.plist`), 'utf8')), sec, job);
   }

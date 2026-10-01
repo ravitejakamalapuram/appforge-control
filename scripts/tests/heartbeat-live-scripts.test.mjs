@@ -63,6 +63,8 @@ test('MUTATION real backup.sh through hb_wrap: a failing run keeps its exit code
   assert.equal(run('backup.sh', ['--bogus'], { APPFORGE_STATE_DIR: stateDir() }).status, 2, 'unknown arguments are refused');
 });
 
+// Only the temp repo: no Paperclip workspace base clones, no App-token minting.
+const ISOLATED = { REPO_REFRESH_WS_REPOS: '', REPO_REFRESH_TOKEN_CMD: 'false', NTFY_TOPIC: '' };
 function productsRoot() {
   const root = mkdtempSync(path.join(tmpdir(), 'hb-repos-'));
   const g = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'init.defaultBranch=main', ...a], { stdio: 'pipe' });
@@ -77,7 +79,7 @@ function productsRoot() {
 test('real repo-refresh.sh through hb_wrap: success exits 0 and stamps lastSuccess; the body runs once', () => {
   const { root } = productsRoot();
   const state = stateDir();
-  const r = run('repo-refresh.sh', [], { APPFORGE_STATE_DIR: state, APPFORGE_PRODUCTS_ROOT: root, REPO_REFRESH_REPOS: 'demo', NTFY_TOPIC: '' });
+  const r = run('repo-refresh.sh', [], { APPFORGE_STATE_DIR: state, APPFORGE_PRODUCTS_ROOT: root, REPO_REFRESH_REPOS: 'demo', ...ISOLATED });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(count(r.stdout, 'repo-refresh: done: 1 refreshed, 0 failed'), 1, r.stdout);
   const s = readJson(stampPath(state, 'repo-refresh'));
@@ -90,7 +92,7 @@ test('MUTATION real repo-refresh.sh through hb_wrap: a failing run exits 1, is s
   g('-C', path.join(root, 'demo'), 'remote', 'set-url', 'origin', path.join(root, 'gone.git'));
   const state = stateDir();
   seedStamp(state, 'repo-refresh', '2026-10-01T00:00:00Z');
-  const r = run('repo-refresh.sh', [], { APPFORGE_STATE_DIR: state, APPFORGE_PRODUCTS_ROOT: root, REPO_REFRESH_REPOS: 'demo', NTFY_TOPIC: '' });
+  const r = run('repo-refresh.sh', [], { APPFORGE_STATE_DIR: state, APPFORGE_PRODUCTS_ROOT: root, REPO_REFRESH_REPOS: 'demo', ...ISOLATED });
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.equal(count(r.stdout, 'repo-refresh: done: 0 refreshed, 1 failed'), 1, r.stdout);
   const s = readJson(stampPath(state, 'repo-refresh'));
