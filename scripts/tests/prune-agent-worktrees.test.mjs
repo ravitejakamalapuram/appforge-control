@@ -165,18 +165,18 @@ test('a missing repo, a non-git directory and a bare name never fail the launch'
 });
 
 // The launch-path wiring. agent-launch.sh cannot be run end-to-end here because
-// its next step mints a real GitHub App installation token, so this asserts the
+// its next step reads the founder's real gh token, so this asserts the
 // call site's presence and position in the source instead - the position is the
-// part that matters, since a prune placed after the token mint would not run for
+// part that matters, since a prune placed after the token lookup would not run for
 // an agent whose scope is `none`.
-test('agent-launch.sh invokes the prune backstop before minting a token', () => {
+test('agent-launch.sh invokes the prune backstop before reading the gh token', () => {
   const src = execFileSync('cat', [LAUNCH], { encoding: 'utf8' });
   const call = src.indexOf('"$SCRIPT_DIR/prune-agent-worktrees.sh" "$APPFORGE_AGENT_REPOS"');
   const scopeCheck = src.indexOf('APPFORGE_AGENT_REPOS is not set');
-  const mint = src.indexOf('github-app-token.mjs');
+  const mint = src.indexOf('gh auth token');
 
   assert.ok(call > 0, 'agent-launch.sh must call prune-agent-worktrees.sh');
   assert.ok(call > scopeCheck, 'prune must run after the repo-scope validation');
-  assert.ok(call < mint, 'prune must run before the token mint, so it also covers a `none` scope');
+  assert.ok(call < mint, 'prune must run before the token lookup, so it also covers a `none` scope');
   assert.match(src.slice(call, call + 200), /\|\| true/, 'prune must never be able to block a launch');
 });
