@@ -85,6 +85,11 @@ export function buildSpend({ summary, byAgent, budgets }) {
 // --- 2. run outcomes --------------------------------------------------------
 
 const TERMINAL_BAD = new Set(['failed', 'error', 'timeout', 'cancelled']);
+// APP-338: the claude_local adapter SIGTERMs the CLI 5s after its final result
+// when a Monitor / run_in_background task keeps it alive. The CLI exits 143 and
+// the server records `adapter_failed` / "Adapter failed"; this livenessReason
+// is the only field that tells that apart from a real adapter failure.
+const BACKGROUND_WAIT_KILLED = 'unmanaged background task stopped';
 
 /**
  * Run outcomes since the last digest — failures, abandoned runs,
@@ -121,6 +126,7 @@ export function buildRuns({ runs, since, now }) {
       && new Date(r.startedAt) < new Date(now - DAY_MS)
   );
   const retries = window.filter((r) => r.retryOfRunId);
+  const backgroundWaitKilled = failures.filter((r) => (r.livenessReason ?? '').startsWith(BACKGROUND_WAIT_KILLED));
   // §6.1 rule 6 escalations surface as a run the harness gave up retrying.
   const escalations = window.filter((r) => r.errorCode === 'agent_paused' || r.errorCode === 'agent_not_invokable');
 
@@ -141,6 +147,7 @@ export function buildRuns({ runs, since, now }) {
     max_turns_continuations: continuations.length,
     abandoned: abandoned.map((r) => ({ run_id: r.id, agent_id: r.agentId, started_at: r.startedAt })),
     escalations: escalations.map((r) => ({ run_id: r.id, agent_id: r.agentId, error_code: r.errorCode })),
+    background_wait_killed: backgroundWaitKilled.map((r) => ({ run_id: r.id, agent_id: r.agentId, error_code: r.errorCode, created_at: r.createdAt })),
     retry_count: retries.length,
     failure_rate: window.length ? failures.length / window.length : null,
   };
@@ -326,6 +333,9 @@ export function buildAnomalies({ spend, runs, approvals, incidents, store, portf
   }
   if (runs.escalations.length > 0) {
     flags.push({ check: 'run_escalation', severity: 'warn', detail: `${runs.escalations.length} run(s) ended paused or not-invokable — §6.1 rule 6 escalation territory` });
+  }
+  if (runs.background_wait_killed.length > 0) {
+    flags.push({ check: 'background_wait_killed', severity: 'warn', detail: `${runs.background_wait_killed.length} run(s) ended while a Monitor / background task was live and were killed (shared rule 13, APP-338)` });
   }
   if (runs.failures.length > 0) {
     flags.push({ check: 'run_failures', severity: 'warn', detail: `${runs.failures.length} failed run(s) of ${runs.total}` });
