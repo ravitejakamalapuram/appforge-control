@@ -9,7 +9,7 @@ APP-197 was filed on a misreading of where the credential lives.
 
 ## Where the credential actually lives
 
-`scripts/agent-launch.sh` mints a per-run GitHub App installation token and
+`scripts/agent-launch.sh` reads the founder's personal `gh` token from the keyring (since 2026-10-02; before that it minted a per-run GitHub App installation token) and
 exports it through git's environment-variable config, not through any file:
 
 ```
@@ -33,8 +33,8 @@ $ git config --list --show-origin --show-scope | grep extraheader
 command   command line:   http.https://github.com/.extraheader=AUTHORIZATION: basic ...
 ```
 
-`APPFORGE_GIT_CREDENTIAL` tells you which path your run took: `app` (a token was
-minted) or `none` (the credential-free path — `APPFORGE_AGENT_REPOS=none`, or the
+`APPFORGE_GIT_CREDENTIAL` tells you which path your run took: `founder` (the personal gh token was
+read; `app` in older runs) or `none` (the credential-free path — `APPFORGE_AGENT_REPOS=none`, or the
 degraded path after a mint failure). On `none`, https to github.com is *meant* to
 fail closed. That is not a bug to route around.
 

@@ -40,16 +40,18 @@ infra/macos/                                      launchd/service notes (informa
 company/                                          nightly `paperclipai company export` lands here (not yet wired up)
 ```
 
-## GitHub Apps (P1-05, 2026-09-28)
+## GitHub access for agents (changed 2026-10-02)
 
-`appforge-agents` exists and is installed on the platform repos plus all 9 product repos (see `config/github-apps.yaml` for the exact list — only `release-platform` is deliberately excluded; InvTrack was onboarded as a normal product repo on 2026-09-30). It has `contents:write`, `issues:write`, `pull_requests:write`, `checks:read`, `actions:read` — no `actions:write`, so agents using its tokens cannot dispatch release workflows. Its private key lives at `secrets/appforge-agents.private-key.pem` (gitignored, never commit). No credential broker/minting script exists yet (P1-02) — agents still use the founder's own `GH_TOKEN` via `.envrc` for git/gh operations, same as before this App existed. The App is provisioned but not yet the thing actually granting agent tokens.
+Agents act as the founder's **personal** GitHub account (`ravitejakamalapuram`), with admin on every personal repo. `scripts/agent-launch.sh` reads that account's token from the `gh` keyring at the start of each run (`gh auth token --user ravitejakamalapuram`), so nothing is stored in config or on disk. The `--user` flag matters: the keyring also holds the employer account, which must never be used here. This was a board decision ("we are just starting, admin access for everything, harden later").
 
-A second App, `appforge-release` (actions:write on `release-platform` only, gated behind a verified board approval), is not yet created — that's separate from this one and only needed once a live agent (not the founder's own `gh`/`appforge release` invocation) needs to dispatch a release.
+- `APPFORGE_GIT_CREDENTIAL` is `founder` in a normal run, `unavailable` if the keyring lookup failed (the agent still starts, without push credentials), and `none` for agents with `APPFORGE_AGENT_REPOS=none`.
+- Controls A and B in the launcher stay on, because they keep the employer keychain credential out of raw `git` and `gh`.
+- The `appforge-agents` GitHub App and `scripts/github-app-token.mjs` still exist but are no longer called by the launcher. The `appforge-release` App is shelved (APP-92); nothing needs it.
+- To tighten this later, restore the per-run App mint (git history before this change) and add real OS-level isolation first (see `docs/containment-model.md`).
 
 ## Deliberately not done yet
 
 - No `company export` automation (nightly `paperclipai company export` into this repo).
 - No Tailscale / remote phone access (still requires the founder's OK to run VPN-like software on this work laptop).
-- P1-02 (credential broker: minting scoped installation tokens from `appforge-agents` per-run) — the App exists (above) but nothing mints tokens from it yet.
+- Per-run scoped GitHub App tokens (shelved 2026-10-02 in favour of the founder token, see above).
 - P1-03 (GitHub→Paperclip webhook relay over Tailscale) — blocked on the Tailscale decision above.
-- `appforge-release` App (see above).

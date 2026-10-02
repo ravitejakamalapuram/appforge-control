@@ -10,6 +10,11 @@ what that list is and is not.
 > `~/.appforge/bin/agent-launch.sh`. Editing the source changes nothing live
 > until someone deploys it — see `docs/runtime-launcher.md` (APP-137).
 
+> **Update 2026-10-02:** agents now run with the founder's personal `gh` token (admin on every
+> personal repo) instead of a per-run App installation token, by board decision ("just starting,
+> admin access for everything"). This changes nothing about the boundary below: it was always the OS
+> uid. Controls A and B still keep the employer keychain credential away from agents.
+
 ## The one-line version
 
 There is **one** containment boundary and it is the **OS uid** agent processes run as

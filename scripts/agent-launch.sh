@@ -1,11 +1,12 @@
 #!/bin/bash
 # Wrapper that Paperclip's adapterConfig.command points to instead of the
-# raw `claude` binary. Mints a fresh, hour-lived GitHub App installation
-# token scoped to this agent's repos (APPFORGE_AGENT_REPOS, set per-agent
-# in adapterConfig.env - not sensitive, just a repo-name list), exports it
-# as GH_TOKEN/GITHUB_TOKEN for gh/git, then execs the real claude binary
-# with the original args. A stale bake-in isn't possible since a fresh
-# token is minted on every run.
+# raw `claude` binary. Reads the founder's PERSONAL gh token from the keyring
+# (see FOUNDER TOKEN below), exports it as GH_TOKEN/GITHUB_TOKEN for gh/git, then
+# execs the real claude binary with the original args. Nothing is stored, so a
+# stale bake-in isn't possible. APPFORGE_AGENT_REPOS (set per-agent in
+# adapterConfig.env) now only scopes the worktree prune and the `none` switch;
+# it no longer limits what the token can reach. The GitHub App minting path
+# (scripts/github-app-token.mjs) is still in the repo but no longer called here.
 #
 # The literal value `none` means the agent has no repo capability at all:
 # nothing is minted, and the two credential paths this wrapper can actually
@@ -268,39 +269,29 @@ if [ "$APPFORGE_AGENT_REPOS" = "none" ]; then
 fi
 # -------------------------------------------------------------------------- --
 
-# `set -e` deliberately suspended for the mint: a mint failure is a decision
-# point, not a reason to kill the run. Before APP-132 this command substitution
-# aborted the launcher outright, so one unreachable api.github.com killed the
-# agent run ~700ms in with nothing done - 25 runs and 22 stranded issues on
-# 2026-09-28 alone, none of which needed GitHub to make progress.
-MINT_STATUS=0
-TOKEN_JSON="$(node "$SCRIPT_DIR/github-app-token.mjs" --repos "$APPFORGE_AGENT_REPOS")" || MINT_STATUS=$?
+# FOUNDER TOKEN (2026-10-02, board decision: "we are just starting - admin access
+# for everything, harden later"). Agents act as the founder's PERSONAL GitHub
+# account instead of a per-run App installation token. The token is read from
+# the gh keyring at launch (nothing is stored on disk or in config), exactly as
+# ~/git-personal/.envrc does. `--user` is mandatory: the keyring also holds the
+# employer account, and the globally active gh account is the employer's. Taking
+# "whatever gh says is active" would hand agents the WORK account.
+#
+# GH_CONFIG_DIR is Control B's empty per-run dir at this point, so it is unset for
+# this one lookup (as .envrc does); the keyring itself is not affected by it.
+#
+# A lookup failure degrades to the credential-free environment, same as the old
+# transient-mint path: the agent still starts and can do whatever needs no GitHub.
+# Controls A and B stay on: they are what keep the employer keyring credential
+# out of reach of raw git and `gh`, and they cost nothing.
+FOUNDER_GH_USER="${APPFORGE_GH_USER:-ravitejakamalapuram}"
+GH_TOKEN="$(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_CONFIG_DIR gh auth token --hostname github.com --user "$FOUNDER_GH_USER" 2>/dev/null)" || GH_TOKEN=""
 
-# 75 is EX_TEMPFAIL from github-app-token.mjs: GitHub was unreachable or asked
-# us to back off, and that script's own bounded retries are already spent.
-# Degrade to the credential-free environment - strictly LESS reach than this
-# agent's own scope, so the APP-60 containment invariant still holds - and let
-# the agent get on with whatever part of its work does not need GitHub.
-if [ "$MINT_STATUS" -eq 75 ]; then
-  echo "agent-launch.sh: GitHub App token unavailable (transient); starting agent WITHOUT git push credentials" >&2
+if [ -z "$GH_TOKEN" ]; then
+  echo "agent-launch.sh: no gh token for $FOUNDER_GH_USER in the keyring; starting agent WITHOUT git push credentials" >&2
   scrub_git_credentials
   export APPFORGE_GIT_CREDENTIAL=unavailable
   exec "$REAL_CLAUDE" "$@"
-fi
-
-# Any other non-zero exit is a deterministic misconfiguration: unreadable key,
-# App not installed on a requested repo, malformed config. Those fail the same
-# way on every run, so retrying or degrading would only hide them. Stay fatal.
-if [ "$MINT_STATUS" -ne 0 ]; then
-  echo "agent-launch.sh: GitHub App token mint failed (status $MINT_STATUS) - see the error above" >&2
-  exit "$MINT_STATUS"
-fi
-
-GH_TOKEN="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).token)' "$TOKEN_JSON")"
-
-if [ -z "$GH_TOKEN" ]; then
-  echo "agent-launch.sh: failed to mint a GitHub App installation token" >&2
-  exit 1
 fi
 
 export GH_TOKEN
@@ -331,6 +322,6 @@ export GIT_CONFIG_VALUE_0=""
 export GIT_CONFIG_KEY_1="http.https://github.com/.extraheader"
 export GIT_CONFIG_VALUE_1="AUTHORIZATION: basic $GIT_AUTH_B64"
 unset GIT_AUTH_B64
-export APPFORGE_GIT_CREDENTIAL=app
+export APPFORGE_GIT_CREDENTIAL=founder
 
 exec "$REAL_CLAUDE" "$@"

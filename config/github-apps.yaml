@@ -2,6 +2,8 @@
 # (P1-05, master plan §11.3/§17). No secrets in this file — App IDs and Client
 # IDs are not sensitive; the private key lives outside git at
 # secrets/<name>.private-key.pem (gitignored) and is never committed.
+# NOTE (2026-10-02): agent-launch.sh no longer mints from these Apps; agents use the founder's personal gh
+# token (board decision). The Apps stay registered for a later, hardened setup.
 apps:
   - name: appforge-agents
     purpose: "Day-to-day agent work: repo:write on assigned product, PRs, issues. No actions:write — agents cannot dispatch release workflows."
