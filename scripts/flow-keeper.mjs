@@ -9,6 +9,8 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ASSISTANT_WAIT } from './lib/flow-keeper.mjs';
+import { ciGreenState, cwsReviewState, decideWait, parseWait, prMergedState, staleBlock, statusMdAgeMs } from './lib/waits.mjs';
 import {
   agentsToResume, decide, escalationTitle, pruneKicks, wakeBody, ESCALATE_EVERY_MS,
 } from './lib/flow-keeper.mjs';
@@ -17,6 +19,7 @@ const dry = process.argv.includes('--dry-run');
 const env = process.env;
 const STATE_DIR = env.APPFORGE_STATE_DIR || join(process.cwd(), 'state');
 const STATE_FILE = join(STATE_DIR, 'flow-keeper.json');
+const WAITS_FILE = join(STATE_DIR, 'waits.json');
 const INBOX_FILE = join(STATE_DIR, 'assistant-inbox.json');
 const log = (m) => console.log(`[${new Date().toISOString()}] flow-keeper: ${m}`);
 const die = (m) => { console.error(`[${new Date().toISOString()}] flow-keeper: FAIL ${m}`); notify(`flow-keeper did not run: ${m}`); process.exit(2); };
@@ -38,7 +41,7 @@ function notify(msg) {
 }
 
 function loadState() {
-  try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { return { kicks: {}, resumes: {}, escalated: {}, inboxNotifiedAt: 0, inboxKey: '' }; }
+  try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { return { kicks: {}, resumes: {}, escalated: {}, waits: {}, inboxNotifiedAt: 0, inboxKey: '' }; }
 }
 
 const now = Date.now();
@@ -54,7 +57,75 @@ try {
 
 const byId = new Map(agents.map((a) => [a.id, a]));
 const busy = new Set(busyRuns.map((r) => r.agentId));
-const results = { woke: [], escalated: [], assistant: [], resumed: [] };
+state.waits ??= {};
+const results = { woke: [], escalated: [], assistant: [], resumed: [], released: [], waiting: [] };
+
+const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] });
+const prRef = (url) => { const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url ?? ''); return m ? { repo: m[1], n: m[2] } : null; };
+/** Run one named check; never throws (an unreadable source is "unknown", which keeps waiting and says so). */
+function runCheck(wait) {
+  try {
+    if (wait.check === 'cws_review_clear') {
+      const md = Buffer.from(gh(['api', 'repos/ravitejakamalapuram/release-platform/contents/STATUS.md?ref=status', '--jq', '.content']), 'base64').toString('utf8');
+      if (statusMdAgeMs(md, now) > wait.recheckMs) {
+        if (!dry) { try { gh(['workflow', 'run', 'dashboard.yml', '-R', 'ravitejakamalapuram/release-platform']); } catch { /* next pass retries */ } }
+        return { known: false, detail: 'dashboard was stale; refresh requested, will read it on the next pass' };
+      }
+      return cwsReviewState(md, wait.args.item);
+    }
+    const ref = prRef(wait.args.url);
+    if (!ref) return { known: false, detail: `not a pull request url: ${wait.args.url}` };
+    const pr = JSON.parse(gh(['pr', 'view', ref.n, '-R', ref.repo, '--json', 'state,statusCheckRollup']));
+    return wait.check === 'pr_merged' ? prMergedState(pr) : ciGreenState(pr);
+  } catch (e) { return { known: false, detail: `check could not run: ${String(e.message).slice(0, 100)}` }; }
+}
+const issueById = new Map(issues.map((i) => [i.id, i]));
+const waitOf = (issue) => parseWait(`${issue.unblockDescriptor?.action ?? ''}\n${issue.waitLine ?? ''}`);
+
+// 1b. Blocked work must have a live reason. Finished blockers release it; an external wait is checked by name.
+for (const issue of issues.filter((i) => i.status === 'blocked')) {
+  const tag = issue.identifier;
+  try { issue.blockedBy = (await api('GET', `/api/issues/${issue.id}`)).blockedBy ?? []; } catch { issue.blockedBy = []; } // the list rows carry no blocker detail
+  if (staleBlock(issue, (b) => issueById.get(b.id ?? b.blockerIssueId)?.status ?? b.status)) {
+    log(`${dry ? 'would release' : 'releasing'} ${tag}: every blocker is finished`);
+    if (!dry) { try { await api('PATCH', `/api/issues/${issue.id}`, { status: 'todo', blockedByIssueIds: [], comment: 'flow-keeper: every blocker of this issue is finished, so it is no longer blocked. Continue now: do the next concrete step. Do not end the run with the issue in the same state.' }); } catch (e) { log(`release ${tag} failed: ${e.message.slice(0, 100)}`); continue; } }
+    results.released.push(tag);
+    continue;
+  }
+  const wait = waitOf(issue);
+  if (!wait) continue;
+  const rec = (state.waits[issue.id] ??= { firstSeen: now });
+  const d = decideWait({ wait, lastCheckedMs: rec.lastChecked ?? 0, now });
+  if (d.action === 'invalid') { log(`${tag}: ${d.why}`); rec.detail = d.why; results.waiting.push({ identifier: tag, title: issue.title, check: 'invalid', detail: d.why }); continue; }
+  if (d.action === 'check') {
+    const r = runCheck(wait);
+    rec.lastChecked = now; rec.detail = r.detail; rec.known = !!r.known;
+    log(`${tag}: ${wait.check} -> ${r.known ? (r.clear ? 'CLEAR' : 'still waiting') : 'unknown'} (${r.detail})`);
+    if (r.known && r.clear) {
+      const toAssistant = ASSISTANT_WAIT.test(issue.unblockDescriptor?.action ?? '');
+      if (toAssistant) {
+        results.assistant.push({ identifier: tag, title: issue.title, agent: byId.get(issue.assigneeAgentId)?.name, status: issue.status, since: new Date(now).toISOString(), why: `the wait is over (${r.detail}); the next step is the board's assistant's: ${String(issue.unblockDescriptor.action).slice(0, 200)}` });
+      } else if (!dry) {
+        try { await api('PATCH', `/api/issues/${issue.id}`, { status: 'todo', comment: `flow-keeper: the wait is over (${wait.check}: ${r.detail}). Continue now with the next step. Do not end the run with the issue in the same state.` }); } catch (e) { log(`release ${tag} failed: ${e.message.slice(0, 100)}`); }
+      }
+      results.released.push(tag); delete state.waits[issue.id]; continue;
+    }
+  }
+  if (d.action === 'overdue') {
+    const t = `Overdue wait: ${tag} is still waiting`;
+    log(`OVERDUE ${tag}: ${d.why}`);
+    if (!dry && now - (state.escalated[issue.id] ?? 0) > ESCALATE_EVERY_MS && !openTitles1.has(t)) {
+      try {
+        await api('POST', `/api/companies/${CO}/issues`, { title: t, status: 'todo', priority: 'high', assigneeAgentId: agents.find((a) => a.role === 'ceo')?.id, projectId: issue.projectId, projectWorkspaceId: issue.projectWorkspaceId,
+          description: `${tag} (${issue.title}) waits on \`${wait.check}\` and ${d.why}. Last check: ${rec.detail ?? 'none'}. CEO: decide whether to keep waiting (set a new deadline in the issue's WAIT line), change the plan, or cancel. Do not just wait again.` });
+        state.escalated[issue.id] = now; notify(`${tag} wait is overdue`);
+      } catch (e) { log(`overdue issue failed: ${e.message.slice(0, 120)}`); }
+    }
+    results.escalated.push(tag);
+  }
+  results.waiting.push({ identifier: tag, title: issue.title, check: wait.check, detail: rec.detail ?? 'not checked yet', lastChecked: rec.lastChecked ? new Date(rec.lastChecked).toISOString() : null, deadline: wait.deadlineMs ? new Date(wait.deadlineMs).toISOString().slice(0, 10) : null });
+}
+const openTitles1 = new Set(issues.filter((i) => !['done', 'cancelled'].includes(i.status)).map((i) => i.title));
 
 // 1. Errored agents with a transient cause come back (bounded per hour).
 for (const a of agentsToResume({ agents, resumes: state.resumes, now })) {
@@ -68,6 +139,7 @@ for (const a of agentsToResume({ agents, resumes: state.resumes, now })) {
 // 2. Idle issues.
 const openTitles = new Set(issues.filter((i) => !['done', 'cancelled'].includes(i.status)).map((i) => i.title));
 for (const issue of issues) {
+  if (issue.status === 'blocked' && waitOf(issue) && !waitOf(issue).invalid) continue; // handled by its named check above
   const first = decide({ issue, agent: byId.get(issue.assigneeAgentId), busyAgents: busy, lastComment: null, kicks: state.kicks[issue.id], now });
   let d = first;
   if (first.action !== 'none' || ['todo', 'in_progress', 'in_review', 'blocked'].includes(issue.status)) {
@@ -115,6 +187,7 @@ if (!dry) {
     state.inboxNotifiedAt = now;
   }
   state.inboxKey = inboxKey;
+  writeFileSync(WAITS_FILE, JSON.stringify({ updated: new Date(now).toISOString(), items: results.waiting }, null, 2) + '\n');
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2) + '\n');
 }
-log(`pass done: woke ${results.woke.length} [${results.woke.join(' ')}], escalated ${results.escalated.length} [${results.escalated.join(' ')}], resumed ${results.resumed.length}, waiting on the assistant ${results.assistant.length} [${inboxKey}]${dry ? ' (dry run: nothing changed)' : ''}`);
+log(`pass done: woke ${results.woke.length} [${results.woke.join(' ')}], escalated ${results.escalated.length} [${results.escalated.join(' ')}], resumed ${results.resumed.length}, released ${results.released.length} [${results.released.join(' ')}], waiting on outside events ${results.waiting.length}, waiting on the assistant ${results.assistant.length} [${inboxKey}]${dry ? ' (dry run: nothing changed)' : ''}`);
