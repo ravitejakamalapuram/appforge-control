@@ -44,7 +44,9 @@ let seen;
 try { seen = new Set(JSON.parse(readFileSync(STATE, 'utf8'))); }
 catch (e) { if (e.code === 'ENOENT') seen = new Set(); else fail(`state file ${STATE} is unreadable: ${e.message}`); }
 
-const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+// A gh call left hanging across a Mac sleep never returns, and launchd starts no new run while this one lives (APP-350).
+const GH_TIMEOUT_MS = Number(env.RELEASE_BRIDGE_GH_TIMEOUT_MS ?? 60_000);
+const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: GH_TIMEOUT_MS });
 const onNew = (s) => {
   curl(['-X', 'POST', '-H', 'Content-Type: application/json', '-d', '@-', `${env.PAPERCLIP_API_URL}/api/companies/${env.PAPERCLIP_COMPANY_ID}/issues`], JSON.stringify(issueBody(s, CTO_ID, PROJECT)));
   notify(`${s.kind} in ${s.repo}: ${s.url}`);
