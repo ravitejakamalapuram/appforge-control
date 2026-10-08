@@ -73,6 +73,24 @@ test('the error-code distribution is reported, because one failure rate hides wh
   assert.equal(runs.failure_rate, 2 / 3);
 });
 
+test('a run killed while waiting on a background task is named, not just counted as a failure (APP-338)', () => {
+  // The claude_local adapter SIGTERMs the CLI 5s after its final result if a
+  // Monitor / run_in_background task keeps it alive; the CLI exits 143 and the
+  // server records `adapter_failed` with the bare "Adapter failed". The only
+  // field that tells it apart from a real adapter failure is livenessReason.
+  const runs = buildRuns({
+    runs: [
+      { id: 'bg', agentId: 'cto', createdAt: '2026-09-29T08:00:00Z', status: 'failed', errorCode: 'adapter_failed', livenessReason: 'unmanaged background task stopped; no durable live path' },
+      { id: 'real', createdAt: '2026-09-29T08:00:00Z', status: 'failed', errorCode: 'adapter_failed', livenessReason: null },
+    ],
+    since: SINCE, now: NOW,
+  });
+  assert.deepEqual(runs.background_wait_killed.map((r) => r.run_id), ['bg'], 'only the background-kill run is in the bucket');
+  assert.equal(runs.failures.length, 2, 'it stays a failure: the platform recorded it as one');
+  const a = buildAnomalies({ ...QUIET, runs: { ...QUIET.runs, background_wait_killed: runs.background_wait_killed } });
+  assert.ok(a.flags.some((f) => f.check === 'background_wait_killed'), 'and it raises its own flag pointing at rule 13');
+});
+
 test('a run outside the window is excluded, and an empty window has a NULL failure rate not 0', () => {
   const runs = buildRuns({ runs: [{ id: 'old', createdAt: '2026-09-01T00:00:00Z', status: 'failed' }], since: SINCE, now: NOW });
   assert.equal(runs.total, 0);
@@ -166,7 +184,7 @@ test('a second reading on the same surface DOES produce a delta', () => {
 
 const QUIET = {
   spend: { agents: [], utilization: 0, metered: true, cap_cents: 10000, unbudgeted_agents: [] },
-  runs: { max_turns: [], max_turns_continuations: 0, failures: [], escalations: [], total: 3 },
+  runs: { max_turns: [], max_turns_continuations: 0, failures: [], escalations: [], background_wait_killed: [], total: 3 },
   approvals: { oldest_age_days: 0, rows: [] },
   incidents: { rows: [] },
   store: { fresh_import_today: true, last_import_as_of: '2026-09-29' },

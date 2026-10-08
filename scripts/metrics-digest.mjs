@@ -137,6 +137,7 @@ function render(d) {
     for (const r of d.runs.failures.slice(0, 5)) L.push(`    ${r.run_id.slice(0, 8)} ${r.status} ${r.error_code ?? ''} ${(r.error ?? '').slice(0, 90)}`.trimEnd());
     if (d.runs.failures.length > 5) L.push(`    … ${d.runs.failures.length - 5} more (--json for the full list)`);
   }
+  if (d.runs.background_wait_killed.length) L.push(`! ${d.runs.background_wait_killed.length} of those ended while a Monitor / background task was live and were killed (rule 13, APP-338): ${d.runs.background_wait_killed.map((r) => r.run_id.slice(0, 8)).join(' ')}`);
   if (d.runs.escalations.length) L.push(`! ${d.runs.escalations.length} run(s) ended paused or not-invokable — §6.1 rule 6 escalation territory`);
   if (d.runs.abandoned.length) L.push(`! ${d.runs.abandoned.length} abandoned run(s) (started, never reported an end)`);
 
