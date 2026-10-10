@@ -9,11 +9,11 @@ import { fileURLToPath } from 'node:url';
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'release-bridge.mjs');
 
 /** Fake `gh` (prints canned JSON per subcommand, or errors) and fake `curl` (records URL + stdin). */
-function fixture({ issues = [], runs = [], ghFails = false, paperclipFails = false }) {
+function fixture({ issues = [], runs = [], ghFails = false, ghHangs = false, paperclipFails = false }) {
   const root = mkdtempSync(join(tmpdir(), 'rb-'));
   const bin = join(root, 'bin'); mkdirSync(bin);
   const calls = join(root, 'calls.log');
-  writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "gh $*" >> "${calls}"\n${ghFails ? 'echo "HTTP 401" >&2; exit 1' : `case "$1" in issue) cat <<'J'\n${JSON.stringify(issues)}\nJ\n;; run) cat <<'J'\n${JSON.stringify(runs)}\nJ\n;; esac`}\n`);
+  writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "gh $*" >> "${calls}"\n${ghHangs ? 'exec sleep 30' : ghFails ? 'echo "HTTP 401" >&2; exit 1' : `case "$1" in issue) cat <<'J'\n${JSON.stringify(issues)}\nJ\n;; run) cat <<'J'\n${JSON.stringify(runs)}\nJ\n;; esac`}\n`);
   writeFileSync(join(bin, 'curl'), `#!/bin/sh\nfor a in "$@"; do case "$a" in http*) url="$a";; esac; done\necho "curl $url" >> "${calls}"\ncase "$url" in *api/companies*) cat >> "${root}/bodies.log"; ${paperclipFails ? 'exit 22' : 'exit 0'};; esac\nexit 0\n`);
   chmodSync(join(bin, 'gh'), 0o755); chmodSync(join(bin, 'curl'), 0o755);
   const apps = join(root, 'apps.yaml');
@@ -57,6 +57,15 @@ test('MUTATION: a gh that errors is BROKEN (ntfy + non-zero), never quiet', () =
   assert.match(r.stdout, /FAIL .*issue list failed/);
   assert.equal(lines(f.calls, /ntfy\.sh\/tt/).length, 1);
   assert.equal(lines(f.calls, /api\/companies/).length, 0);
+});
+
+test('MUTATION: a gh that hangs times out and is BROKEN, not a job that never ends (APP-373)', () => {
+  const f = fixture({ ghHangs: true });
+  const t0 = Date.now();
+  const r = run({ ...f.env, RELEASE_BRIDGE_GH_TIMEOUT_MS: '500' });
+  assert.ok(Date.now() - t0 < 15000, 'run returned well before the 30s hang');
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /FAIL .*issue list failed/);
 });
 
 test('a failed Paperclip POST is broken and is retried next run (not marked seen)', () => {
