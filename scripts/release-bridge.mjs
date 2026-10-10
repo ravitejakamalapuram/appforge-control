@@ -44,7 +44,8 @@ let seen;
 try { seen = new Set(JSON.parse(readFileSync(STATE, 'utf8'))); }
 catch (e) { if (e.code === 'ENOENT') seen = new Set(); else fail(`state file ${STATE} is unreadable: ${e.message}`); }
 
-const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+// APP-373: a gh stuck on a dead connection hung the job for 12h (launchd skips intervals while it runs).
+const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', timeout: Number(env.RELEASE_BRIDGE_GH_TIMEOUT_MS) || 60000, stdio: ['ignore', 'pipe', 'pipe'] });
 const onNew = (s) => {
   curl(['-X', 'POST', '-H', 'Content-Type: application/json', '-d', '@-', `${env.PAPERCLIP_API_URL}/api/companies/${env.PAPERCLIP_COMPANY_ID}/issues`], JSON.stringify(issueBody(s, CTO_ID, PROJECT)));
   notify(`${s.kind} in ${s.repo}: ${s.url}`);
