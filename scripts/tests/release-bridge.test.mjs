@@ -13,7 +13,7 @@ function fixture({ issues = [], runs = [], ghFails = false, paperclipFails = fal
   const root = mkdtempSync(join(tmpdir(), 'rb-'));
   const bin = join(root, 'bin'); mkdirSync(bin);
   const calls = join(root, 'calls.log');
-  writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "gh $*" >> "${calls}"\n${ghFails ? 'echo "HTTP 401" >&2; exit 1' : `case "$1" in issue) cat <<'J'\n${JSON.stringify(issues)}\nJ\n;; run) cat <<'J'\n${JSON.stringify(runs)}\nJ\n;; esac`}\n`);
+  writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "gh $*" >> "${calls}"\n${ghFails === 'once' ? `m="${root}/flaky-$1"; [ -e "$m" ] || { touch "$m"; echo EOF >&2; exit 1; }\n` : ''}${ghFails === true ? 'echo "HTTP 401" >&2; exit 1' : `case "$1" in issue) cat <<'J'\n${JSON.stringify(issues)}\nJ\n;; run) cat <<'J'\n${JSON.stringify(runs)}\nJ\n;; esac`}\n`);
   writeFileSync(join(bin, 'curl'), `#!/bin/sh\nfor a in "$@"; do case "$a" in http*) url="$a";; esac; done\necho "curl $url" >> "${calls}"\ncase "$url" in *api/companies*) cat >> "${root}/bodies.log"; ${paperclipFails ? 'exit 22' : 'exit 0'};; esac\nexit 0\n`);
   chmodSync(join(bin, 'gh'), 0o755); chmodSync(join(bin, 'curl'), 0o755);
   const apps = join(root, 'apps.yaml');
@@ -57,6 +57,13 @@ test('MUTATION: a gh that errors is BROKEN (ntfy + non-zero), never quiet', () =
   assert.match(r.stdout, /FAIL .*issue list failed/);
   assert.equal(lines(f.calls, /ntfy\.sh\/tt/).length, 1);
   assert.equal(lines(f.calls, /api\/companies/).length, 0);
+});
+
+test('a gh that fails once (connection reset) is retried and the run stays green', () => {
+  const f = fixture({ ghFails: 'once', issues: OPEN_ISSUE });
+  const r = run(f.env);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(lines(f.calls, /api\/companies\/co-1\/issues/).length, 1, 'the retried read still bridges the issue');
 });
 
 test('a failed Paperclip POST is broken and is retried next run (not marked seen)', () => {
