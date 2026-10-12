@@ -83,6 +83,7 @@ const issueById = new Map(issues.map((i) => [i.id, i]));
 const waitOf = (issue) => parseWait(`${issue.unblockDescriptor?.action ?? ''}\n${issue.waitLine ?? ''}`);
 
 // 1b. Blocked work must have a live reason. Finished blockers release it; an external wait is checked by name.
+const openTitles1 = new Set(issues.filter((i) => !['done', 'cancelled'].includes(i.status)).map((i) => i.title));
 for (const issue of issues.filter((i) => i.status === 'blocked')) {
   const tag = issue.identifier;
   try { issue.blockedBy = (await api('GET', `/api/issues/${issue.id}`)).blockedBy ?? []; } catch { issue.blockedBy = []; } // the list rows carry no blocker detail
@@ -125,7 +126,6 @@ for (const issue of issues.filter((i) => i.status === 'blocked')) {
   }
   results.waiting.push({ identifier: tag, title: issue.title, check: wait.check, detail: rec.detail ?? 'not checked yet', lastChecked: rec.lastChecked ? new Date(rec.lastChecked).toISOString() : null, deadline: wait.deadlineMs ? new Date(wait.deadlineMs).toISOString().slice(0, 10) : null });
 }
-const openTitles1 = new Set(issues.filter((i) => !['done', 'cancelled'].includes(i.status)).map((i) => i.title));
 
 // 1. Errored agents with a transient cause come back (bounded per hour).
 for (const a of agentsToResume({ agents, resumes: state.resumes, now })) {
