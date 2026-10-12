@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { poll, reposFromApps, issueBody } from './lib/release-bridge.mjs';
+import { poll, reposFromApps, issueBody, retryTransient } from './lib/release-bridge.mjs';
 
 const dry = process.argv.includes('--dry-run');
 if (process.argv.slice(2).some((a) => a !== '--dry-run')) { console.error('usage: release-bridge.mjs [--dry-run]'); process.exit(2); }
@@ -44,7 +44,7 @@ let seen;
 try { seen = new Set(JSON.parse(readFileSync(STATE, 'utf8'))); }
 catch (e) { if (e.code === 'ENOENT') seen = new Set(); else fail(`state file ${STATE} is unreadable: ${e.message}`); }
 
-const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const gh = retryTransient((args) => execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
 const onNew = (s) => {
   curl(['-X', 'POST', '-H', 'Content-Type: application/json', '-d', '@-', `${env.PAPERCLIP_API_URL}/api/companies/${env.PAPERCLIP_COMPANY_ID}/issues`], JSON.stringify(issueBody(s, CTO_ID, PROJECT)));
   notify(`${s.kind} in ${s.repo}: ${s.url}`);

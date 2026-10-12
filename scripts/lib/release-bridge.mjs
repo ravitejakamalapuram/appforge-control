@@ -7,6 +7,21 @@ import { parse } from 'yaml';
 export const RUN_WORKFLOWS = ['listing', 'release', 'promote'];
 export const VERIFY_LABEL = 'listing-verify';
 
+/** Transport-level failures (reset, EOF, timeout) seen from api.github.com on this host; auth/HTTP errors are not here. */
+export const TRANSIENT = /connection reset|unexpected EOF|: EOF\b|i\/o timeout|TLS handshake timeout|connection refused|no such host/i;
+
+/** Wraps a sync `gh(args)` so a transient network error is retried once after `waitMs`; anything else throws at once (APP-384). */
+export function retryTransient(gh, { waitMs = 5000, sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) } = {}) {
+  return (args) => {
+    try { return gh(args); }
+    catch (e) {
+      if (!TRANSIENT.test(`${e.message}\n${e.stderr ?? ''}`)) throw e;
+      sleep(waitMs);
+      return gh(args);
+    }
+  };
+}
+
 /** Repos (owner/name) listed in release-platform/apps.yaml. Throws on an unreadable or empty registry. */
 export function reposFromApps(text) {
   const doc = parse(text);
