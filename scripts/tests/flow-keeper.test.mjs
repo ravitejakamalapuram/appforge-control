@@ -73,3 +73,9 @@ test('the wake carries the issue, a stable idempotency key per bucket, and tells
   assert.notEqual(wakeKey('i1', NOW), wakeKey('i1', NOW + COOLDOWN_MS));
   assert.deepEqual(pruneKicks({ i1: [NOW - WINDOW_MS - 1, NOW - MIN] }, NOW), { i1: [NOW - MIN] });
 });
+
+test('APP-383: openTitles1 is declared before the overdue-wait loop reads it (TDZ crash on the first overdue wait)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../flow-keeper.mjs', import.meta.url), 'utf8');
+  assert.ok(src.indexOf('const openTitles1') < src.indexOf('openTitles1.has('), 'openTitles1 is read before it is declared');
+});
