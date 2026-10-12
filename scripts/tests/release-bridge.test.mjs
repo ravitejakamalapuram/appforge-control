@@ -91,3 +91,17 @@ test('--dry-run calls nothing', () => {
   assert.equal(existsSync(f.calls), false, 'no gh, no curl');
   assert.match(r.stdout, /dry-run: would poll 2 repos/);
 });
+
+test('retryTransient: a connection reset is retried once; an auth error and a second reset are not hidden (APP-384)', async () => {
+  const { retryTransient } = await import('../lib/release-bridge.mjs');
+  const reset = Object.assign(new Error('Command failed: gh run list'), { stderr: 'read tcp 1.2.3.4:1->5.6.7.8:443: read: connection reset by peer' });
+  let n = 0;
+  const flaky = retryTransient(() => { if (n++ === 0) throw reset; return 'ok'; }, { sleep: () => {} });
+  assert.equal(flaky([]), 'ok'); assert.equal(n, 2);
+  n = 0;
+  const auth = retryTransient(() => { n++; throw Object.assign(new Error('Command failed'), { stderr: 'HTTP 401' }); }, { sleep: () => {} });
+  assert.throws(() => auth([]), /Command failed/); assert.equal(n, 1);
+  n = 0;
+  const down = retryTransient(() => { n++; throw reset; }, { sleep: () => {} });
+  assert.throws(() => down([]), /gh run list/); assert.equal(n, 2);
+});
