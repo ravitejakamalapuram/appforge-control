@@ -80,6 +80,8 @@ function runCheck(wait) {
   } catch (e) { return { known: false, detail: `check could not run: ${String(e.message).slice(0, 100)}` }; }
 }
 const issueById = new Map(issues.map((i) => [i.id, i]));
+// Titles of open issues, so an escalation (overdue wait or stuck issue) is filed once. Declared before 1b, its first reader.
+const openTitles = new Set(issues.filter((i) => !['done', 'cancelled'].includes(i.status)).map((i) => i.title));
 const waitOf = (issue) => parseWait(`${issue.unblockDescriptor?.action ?? ''}\n${issue.waitLine ?? ''}`);
 
 // 1b. Blocked work must have a live reason. Finished blockers release it; an external wait is checked by name.
@@ -114,7 +116,7 @@ for (const issue of issues.filter((i) => i.status === 'blocked')) {
   if (d.action === 'overdue') {
     const t = `Overdue wait: ${tag} is still waiting`;
     log(`OVERDUE ${tag}: ${d.why}`);
-    if (!dry && now - (state.escalated[issue.id] ?? 0) > ESCALATE_EVERY_MS && !openTitles1.has(t)) {
+    if (!dry && now - (state.escalated[issue.id] ?? 0) > ESCALATE_EVERY_MS && !openTitles.has(t)) {
       try {
         await api('POST', `/api/companies/${CO}/issues`, { title: t, status: 'todo', priority: 'high', assigneeAgentId: agents.find((a) => a.role === 'ceo')?.id, projectId: issue.projectId, projectWorkspaceId: issue.projectWorkspaceId,
           description: `${tag} (${issue.title}) waits on \`${wait.check}\` and ${d.why}. Last check: ${rec.detail ?? 'none'}. CEO: decide whether to keep waiting (set a new deadline in the issue's WAIT line), change the plan, or cancel. Do not just wait again.` });
@@ -125,7 +127,6 @@ for (const issue of issues.filter((i) => i.status === 'blocked')) {
   }
   results.waiting.push({ identifier: tag, title: issue.title, check: wait.check, detail: rec.detail ?? 'not checked yet', lastChecked: rec.lastChecked ? new Date(rec.lastChecked).toISOString() : null, deadline: wait.deadlineMs ? new Date(wait.deadlineMs).toISOString().slice(0, 10) : null });
 }
-const openTitles1 = new Set(issues.filter((i) => !['done', 'cancelled'].includes(i.status)).map((i) => i.title));
 
 // 1. Errored agents with a transient cause come back (bounded per hour).
 for (const a of agentsToResume({ agents, resumes: state.resumes, now })) {
@@ -137,7 +138,6 @@ for (const a of agentsToResume({ agents, resumes: state.resumes, now })) {
 }
 
 // 2. Idle issues.
-const openTitles = new Set(issues.filter((i) => !['done', 'cancelled'].includes(i.status)).map((i) => i.title));
 for (const issue of issues) {
   if (issue.status === 'blocked' && waitOf(issue) && !waitOf(issue).invalid) continue; // handled by its named check above
   const first = decide({ issue, agent: byId.get(issue.assigneeAgentId), busyAgents: busy, lastComment: null, kicks: state.kicks[issue.id], now });
