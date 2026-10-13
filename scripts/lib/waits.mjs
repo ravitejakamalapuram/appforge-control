@@ -42,6 +42,21 @@ export const statusMdAgeMs = (statusMd, now) => {
   return Number.isFinite(t) ? now - t : Infinity;
 };
 
+/** After this many consecutive stale passes the keeper stops promising "next pass" and says the refresh is not working. */
+export const STALE_DASHBOARD_LOUD_PASSES = 2;
+/** cws_review_clear when STATUS.md is older than the recheck: request a refresh (dispatch() throws on failure) and report
+ *  what really happened. stalePasses = consecutive stale passes before this one. */
+export function staleDashboard({ dispatch, stalePasses = 0, ageMs }) {
+  const passes = stalePasses + 1;
+  const age = Number.isFinite(ageMs) ? `${Math.round(ageMs / 3600000)}h old` : 'no update stamp';
+  let failed = null;
+  try { dispatch(); } catch (e) { failed = String(e?.stderr || e?.message || e).trim().split('\n')[0].slice(0, 200); }
+  const parts = [failed ? `dashboard is stale (${age}) and the refresh dispatch FAILED: ${failed}` : `dashboard is stale (${age}); refresh requested`];
+  if (passes >= STALE_DASHBOARD_LOUD_PASSES) parts.push(`still stale after ${passes} passes: the refresh is not producing a fresh STATUS.md`);
+  else if (!failed) parts.push('will read it on the next pass');
+  return { known: false, loud: !!failed || passes >= STALE_DASHBOARD_LOUD_PASSES, stalePasses: passes, detail: parts.join('; ') };
+}
+
 export function prMergedState(pr) {
   if (!pr) return { known: false, detail: 'pull request not readable' };
   if (pr.state === 'MERGED') return { known: true, clear: true, detail: 'pull request is merged' };
