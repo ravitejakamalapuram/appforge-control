@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseWait, cwsReviewState, statusMdAgeMs, prMergedState, ciGreenState, decideWait, staleBlock, MIN_RECHECK_MS } from '../lib/waits.mjs';
+import { parseWait, cwsReviewState, statusMdAgeMs, prMergedState, ciGreenState, decideWait, staleBlock, MIN_RECHECK_MS, staleDashboard, STALE_DASHBOARD_LOUD_PASSES } from '../lib/waits.mjs';
 
 const NOW = Date.parse('2026-10-02T12:00:00Z');
 const MIN = 60000;
@@ -57,4 +57,24 @@ test('staleBlock can look blockers up by id when the row carries no status', () 
   const st = { a: 'done', b: 'todo' };
   assert.equal(staleBlock({ status: 'blocked', blockedBy: [{ id: 'a' }] }, (x) => st[x.id]), true);
   assert.equal(staleBlock({ status: 'blocked', blockedBy: [{ id: 'a' }, { id: 'b' }] }, (x) => st[x.id]), false);
+});
+
+test('stale dashboard: a failed refresh dispatch is reported with the real error, not swallowed (APP-389)', () => {
+  const err = Object.assign(new Error('Command failed: gh workflow run dashboard.yml'), { stderr: 'could not create workflow dispatch event: HTTP 403: Must have admin rights to Repository.\n' });
+  const r = staleDashboard({ ageMs: 30 * 3600000, dispatch: () => { throw err; } });
+  assert.equal(r.known, false);
+  assert.equal(r.loud, true);
+  assert.match(r.detail, /refresh dispatch FAILED: could not create workflow dispatch event: HTTP 403/);
+  assert.doesNotMatch(r.detail, /will read it on the next pass/);
+});
+
+test('stale dashboard: a working dispatch waits one pass, then says the refresh is not producing a fresh dashboard', () => {
+  const first = staleDashboard({ ageMs: 5 * 3600000, dispatch: () => {} });
+  assert.equal(first.loud, false);
+  assert.match(first.detail, /refresh requested; will read it on the next pass/);
+  const later = staleDashboard({ ageMs: 9 * 3600000, dispatch: () => {}, stalePasses: first.stalePasses });
+  assert.equal(later.stalePasses, STALE_DASHBOARD_LOUD_PASSES);
+  assert.equal(later.loud, true);
+  assert.match(later.detail, /still stale after 2 passes: the refresh is not producing a fresh STATUS\.md/);
+  assert.doesNotMatch(later.detail, /next pass/);
 });

@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ASSISTANT_WAIT } from './lib/flow-keeper.mjs';
-import { ciGreenState, cwsReviewState, decideWait, parseWait, prMergedState, staleBlock, statusMdAgeMs } from './lib/waits.mjs';
+import { ciGreenState, cwsReviewState, decideWait, parseWait, prMergedState, staleBlock, staleDashboard, statusMdAgeMs } from './lib/waits.mjs';
 import {
   agentsToResume, decide, escalationTitle, pruneKicks, wakeBody, ESCALATE_EVERY_MS,
 } from './lib/flow-keeper.mjs';
@@ -60,17 +60,20 @@ const busy = new Set(busyRuns.map((r) => r.agentId));
 state.waits ??= {};
 const results = { woke: [], escalated: [], assistant: [], resumed: [], released: [], waiting: [] };
 
-const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] });
+const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] }); // stderr is kept: it carries the real error
 const prRef = (url) => { const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url ?? ''); return m ? { repo: m[1], n: m[2] } : null; };
 /** Run one named check; never throws (an unreadable source is "unknown", which keeps waiting and says so). */
-function runCheck(wait) {
+function runCheck(wait, rec) {
   try {
     if (wait.check === 'cws_review_clear') {
       const md = Buffer.from(gh(['api', 'repos/ravitejakamalapuram/release-platform/contents/STATUS.md?ref=status', '--jq', '.content']), 'base64').toString('utf8');
-      if (statusMdAgeMs(md, now) > wait.recheckMs) {
-        if (!dry) { try { gh(['workflow', 'run', 'dashboard.yml', '-R', 'ravitejakamalapuram/release-platform']); } catch { /* next pass retries */ } }
-        return { known: false, detail: 'dashboard was stale; refresh requested, will read it on the next pass' };
+      const ageMs = statusMdAgeMs(md, now);
+      if (ageMs > wait.recheckMs) {
+        const r = staleDashboard({ ageMs, stalePasses: rec.stalePasses, dispatch: () => { if (!dry) gh(['workflow', 'run', 'dashboard.yml', '-R', 'ravitejakamalapuram/release-platform']); } });
+        rec.stalePasses = r.stalePasses;
+        return r;
       }
+      delete rec.stalePasses;
       return cwsReviewState(md, wait.args.item);
     }
     const ref = prRef(wait.args.url);
@@ -80,6 +83,7 @@ function runCheck(wait) {
   } catch (e) { return { known: false, detail: `check could not run: ${String(e.message).slice(0, 100)}` }; }
 }
 const issueById = new Map(issues.map((i) => [i.id, i]));
+const openTitles1 = new Set(issues.filter((i) => !['done', 'cancelled'].includes(i.status)).map((i) => i.title));
 const waitOf = (issue) => parseWait(`${issue.unblockDescriptor?.action ?? ''}\n${issue.waitLine ?? ''}`);
 
 // 1b. Blocked work must have a live reason. Finished blockers release it; an external wait is checked by name.
@@ -98,9 +102,10 @@ for (const issue of issues.filter((i) => i.status === 'blocked')) {
   const d = decideWait({ wait, lastCheckedMs: rec.lastChecked ?? 0, now });
   if (d.action === 'invalid') { log(`${tag}: ${d.why}`); rec.detail = d.why; results.waiting.push({ identifier: tag, title: issue.title, check: 'invalid', detail: d.why }); continue; }
   if (d.action === 'check') {
-    const r = runCheck(wait);
+    const r = runCheck(wait, rec);
     rec.lastChecked = now; rec.detail = r.detail; rec.known = !!r.known;
-    log(`${tag}: ${wait.check} -> ${r.known ? (r.clear ? 'CLEAR' : 'still waiting') : 'unknown'} (${r.detail})`);
+    log(`${r.loud ? 'FAIL ' : ''}${tag}: ${wait.check} -> ${r.known ? (r.clear ? 'CLEAR' : 'still waiting') : 'unknown'} (${r.detail})`);
+    if (r.loud) notify(`${tag} wait cannot be read: ${r.detail}`);
     if (r.known && r.clear) {
       const toAssistant = ASSISTANT_WAIT.test(issue.unblockDescriptor?.action ?? '');
       if (toAssistant) {
@@ -125,7 +130,6 @@ for (const issue of issues.filter((i) => i.status === 'blocked')) {
   }
   results.waiting.push({ identifier: tag, title: issue.title, check: wait.check, detail: rec.detail ?? 'not checked yet', lastChecked: rec.lastChecked ? new Date(rec.lastChecked).toISOString() : null, deadline: wait.deadlineMs ? new Date(wait.deadlineMs).toISOString().slice(0, 10) : null });
 }
-const openTitles1 = new Set(issues.filter((i) => !['done', 'cancelled'].includes(i.status)).map((i) => i.title));
 
 // 1. Errored agents with a transient cause come back (bounded per hour).
 for (const a of agentsToResume({ agents, resumes: state.resumes, now })) {
